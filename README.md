@@ -69,12 +69,8 @@ may vary.
 After about 10 minutes, you will be prompted for passwords for each of the
 various external services: MongoDB, PostgreSQL, RabbitMQ, and Redis. You should
 record these passwords in a safe place. You will also be asked for a master
-encryption key; this can be generated with the following command:
-```shell
-xxd -l 32 -c 32 -p < /dev/random | xxd -r -p | base64
-```
-If you would like to use a source of randomness other than `/dev/random`, this
-is just a base64-encoded random 32-byte string.
+encryption key; this should be the result of base64-encoding a random 32-byte
+string. For assistance in generating this, reach out to LumenVox.
 
 After a successful installation, the script will output some information on how
 to add a worker node.
