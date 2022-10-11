@@ -1,0 +1,34 @@
+# kubeadm basic values
+
+lumenvox-common:
+  licensing:
+    # Note: licensing (and therefore system) will not work without a valid clusterGuid value
+    clusterGuid: "GET-CLUSTER-GUID-FROM-LUMENVOX"
+
+global:
+  lumenvox:
+    ingress:
+      className: nginx
+  image:
+    pullPolicy: Always
+  mockData:
+    enabled: true
+    testDataString: ""
+    deploymentId: []
+    jsonKeys:
+      master: ''
+      customer: ''
+      emergencyPublic: ''
+  enabled:
+    lumenvoxSpeech: false
+    lumenvoxVb: false
+    lumenvoxCommon: true
+  asrLanguages:
+    - name: "en"
+      version: "2.2.0"
+  ttsLanguages:
+    - name: "en_us"
+      voices:
+        - name: "chris"
+  vbLanguages:
+    - name: "en_US"
