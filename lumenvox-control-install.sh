@@ -42,6 +42,9 @@ if [ $SWAP_DEVICES -gt 0 ]; then
   exit 1
 fi
 
+# Ensure that the ip_tables module is loaded
+
+
 #############################################
 # Step 1: Install docker.
 #############################################
@@ -557,6 +560,8 @@ if ! lsmod | grep ip_tables >/dev/null 2>&1; then
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to load ip_tables module. Attempting to proceed...\n" | $TEE -a
     fi
+    printf "\t\t\tNOTE: ip_tables was manually loaded. To ensure that the cluster works after a server restart, you should add ip_tables to modules.conf with the following command:\n"
+    printf "\t\t\t\techo \"ip_tables\" | sudo tee -a /etc/modules-load.d/modules.conf >/dev/null\n"
 fi
 
 # Install linkerd CLI
