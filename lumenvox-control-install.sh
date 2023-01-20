@@ -415,7 +415,7 @@ EOF
     fi
 
     printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
-    sudo yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo yum install -y kubelet-1.25.4 kubeadm-1.25.4 kubectl-1.25.4 cri-tools-1.25.0 --disableexcludes=kubernetes 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install kubernetes components\n" | $TEE -a
         exit 1
