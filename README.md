@@ -39,7 +39,7 @@ Before starting this process, you will need the following:
 For testing purposes, a certificate/key pair can be generated with the following
 steps:
 1. `openssl genrsa -out server.key 2048`
-2. `openssl req -new -x509 -sha256 -key server.key -out server.crt -days 3650 -addext "subjectAltName = DNS:speech-api.testmachine.com"`
+2. `openssl req -new -x509 -sha256 -key server.key -out server.crt -days 3650 -addext "subjectAltName = DNS:lumenvox-api.testmachine.com, DNS:biometric-api.testmachine.com, DNS:management-api.testmachine.com, DNS:reporting-api.testmachine.com, DNS:admin-portal.testmachine.com, DNS:deployment-portal.testmachine.com"`
 
 The second command will prompt you for information; outside of production, all
 fields may be left empty. Be sure that the subjectAltName/SAN matches the

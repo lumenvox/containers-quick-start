@@ -71,6 +71,7 @@ case $DISTRO in
   centos | rhel | rocky)
     sudo systemctl stop firewalld
     sudo systemctl disable firewalld
+    sudo setenforce 0
     sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
     ;;
   *)
@@ -338,11 +339,11 @@ case $DISTRO in
     cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo 1>>$MAIN_LOG 2>>$ERR_LOG
 [kubernetes]
 name=Kubernetes
-baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-\$basearch
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.27/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
-exclude=kubelet kubeadm kubectl
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.27/rpm/repodata/repomd.xml.key
+exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
 EOF
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to add yum repo at /etc/yum.repos.d/kubernetes.repo\n" | $TEE -a
@@ -365,13 +366,14 @@ EOF
     fi
 
     printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
-    sudo yum install -y kubelet-1.26.3 kubeadm-1.26.3 kubectl-1.26.3 --disableexcludes=kubernetes 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo yum install -y kubelet-1.27.11-1.1 kubeadm-1.27.11-1.1 kubectl-1.27.11-1.1 --disableexcludes=kubernetes 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo systemctl enable --now kubelet 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install kubernetes components\n" | $TEE -a
         exit 1
     fi
     sudo yum -y install python3-dnf-plugin-versionlock  1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo yum versionlock kubeadm-1.26.3 kubelet-1.26.3 kubectl-1.26.3  1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo yum versionlock kubeadm-1.27.11-1.1 kubelet-1.27.11-1.1 kubectl-1.27.11-1.1  1>>$MAIN_LOG 2>>$ERR_LOG
     ;;
 
   ubuntu)
@@ -390,14 +392,14 @@ EOF
     fi
 
     printf "\tAdding Kubernetes apt repository...\n" | $TEE -a
-    echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG >/dev/null
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.27/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG >/dev/null
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to add Kubernetes apt repository\n" | $TEE -a
         exit 1
     fi
 
     printf "\tUpdating apt repositories...\n" | $TEE -a
-    sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://dl.k8s.io/apt/doc/apt-key.gpg  1>>$MAIN_LOG 2>>$ERR_LOG
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.27/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg  1>>$MAIN_LOG 2>>$ERR_LOG
     sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to update apt repositories\n" | $TEE -a
@@ -405,7 +407,7 @@ EOF
     fi
 
     printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
-    sudo apt-get install -y kubelet=1.26.3-00 kubeadm=1.26.3-00 kubectl=1.26.3-00 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo apt install -y kubelet=1.27.11-1.1 kubeadm=1.27.11-1.1 kubectl=1.27.11-1.1 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install kubernetes components\n" | $TEE -a
         exit 1
@@ -448,8 +450,8 @@ fi
 if ! command -v crictl &> /dev/null
 then
     echo "crictl could not found -> installing"
-    wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.26.0/crictl-v1.26.0-linux-amd64.tar.gz 1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo tar zxvf crictl-v1.26.0-linux-amd64.tar.gz -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
+    wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.27.0/crictl-v1.27.0-linux-amd64.tar.gz 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo tar zxvf crictl-v1.27.0-linux-amd64.tar.gz -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install crictl" | $TEE -a
         exit 1
