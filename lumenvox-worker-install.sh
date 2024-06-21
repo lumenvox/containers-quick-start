@@ -366,14 +366,14 @@ EOF
     fi
 
     printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
-    sudo yum install -y kubelet-1.27.11-1.1 kubeadm-1.27.11-1.1 kubectl-1.27.11-1.1 --disableexcludes=kubernetes 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes 1>>$MAIN_LOG 2>>$ERR_LOG
     sudo systemctl enable --now kubelet 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install kubernetes components\n" | $TEE -a
         exit 1
     fi
     sudo yum -y install python3-dnf-plugin-versionlock  1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo yum versionlock kubeadm-1.27.11-1.1 kubelet-1.27.11-1.1 kubectl-1.27.11-1.1  1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo yum versionlock kubeadm kubelet kubectl  1>>$MAIN_LOG 2>>$ERR_LOG
     ;;
 
   ubuntu)
@@ -407,7 +407,7 @@ EOF
     fi
 
     printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
-    sudo apt install -y kubelet=1.27.11-1.1 kubeadm=1.27.11-1.1 kubectl=1.27.11-1.1 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo apt install -y kubelet kubeadm kubectl 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install kubernetes components\n" | $TEE -a
         exit 1

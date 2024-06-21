@@ -8,7 +8,7 @@ fi
 # check if input files exists
 currentdir=`pwd`
 
-printf "\t\tauctual path is $currentdir ...\n"
+printf "\t\tactual path is $currentdir ...\n"
 
 # Check if entered parameters are present
 input_param_check=($1 $2)
@@ -537,14 +537,14 @@ EOF
     fi
 
     printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
-    sudo yum install -y kubelet-1.27.6 kubeadm-1.27.6 kubectl-1.27.6 --disableexcludes=kubernetes 1>>$MAIN_LOG 2>>$
+    sudo yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes 1>>$MAIN_LOG 2>>$
     sudo systemctl enable --now kubelet 1>>$MAIN_LOG 2>>$
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install kubernetes components\n" | $TEE -a
         exit 1
     fi
     sudo yum -y install python3-dnf-plugin-versionlock  1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo yum versionlock kubeadm-1.27.6 kubelet-1.27.6 kubectl-1.27.6  1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo yum versionlock kubeadm kubelet kubectl  1>>$MAIN_LOG 2>>$ERR_LOG
     ;;
 
   ubuntu)
@@ -578,7 +578,7 @@ EOF
     fi
 
     printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
-    sudo apt install -y kubelet=1.27.11-1.1 kubeadm=1.27.11-1.1 kubectl=1.27.11-1.1 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo apt install -y kubelet kubeadm kubectl 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install kubernetes components\n" | $TEE -a
         exit 1
@@ -701,7 +701,9 @@ fi
 
 # Install linkerd CLI
 printf "\tDownloading linkerd install script...\n" | $TEE -a
-curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install https://run.linkerd.io/install 1>>$MAIN_LOG 2>>$ERR_LOG
+# curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install https://run.linkerd.io/install 1>>$MAIN_LOG 2>>$ERR_LOG
+curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install https://lumenvox-public-assets.s3.us-east-1.amazonaws.com/third-party/linkerd/linkerd_install 1>>$MAIN_LOG 2>>$ERR_LOG
+
 if [ $? -ne 0 ]; then
     printf "\t\tFailed to download linkerd install script\n" | $TEE -a
     exit 1
@@ -774,6 +776,7 @@ if [ $? -ne 0 ]; then
     rm -f linkerd_install_manifest.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tCleanup: failed to remove linkerd_install_manifest.yaml\n" | $TEE -a
+		    ll
     fi
     exit 1
 fi
