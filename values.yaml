@@ -1,34 +1,45 @@
 # kubeadm basic values
 
-lumenvox-common:
-  licensing:
-    # Note: licensing (and therefore system) will not work without a valid clusterGuid value
-    clusterGuid: "GET-CLUSTER-GUID-FROM-LUMENVOX"
-
 global:
+  licensing:
+  # Note: licensing (and therefore system) will not work without a valid clusterGuid value
+    clusterGuid: "<lumenvox-to-provide-cluster-guid>"
+  defaultNamespace: "lumenvox"
+  hostnameSuffix: ".testmachine.com"
   lumenvox:
     ingress:
       className: nginx
+    loggingVerbosity: "warn"
+    redisTtl: 4h  
   image:
-    pullPolicy: Always
-  mockData:
-    enabled: true
-    testDataString: ""
-    deploymentId: []
-    jsonKeys:
-      master: ''
-      customer: ''
-      emergencyPublic: ''
+    tag: ":5.0"  
+  rabbitmq:
+    enableTLS: false
+    connection:
+      url: "<ip-address-of-server-running-rabbitmq>"
+  redis:
+    enableTLS: false
+    connection:
+      url: "<ip-address-of-server-running-redis>"
+  mongodb:
+    connection:
+      url: "<ip-address-of-server-running-mongodb>"
+  postgresql:
+    connection:
+      url: "<ip-address-of-server-running-postgres>"
+      databaseName: "lumenvox_single_db"
+      databaseSchema: "public"
   enabled:
-    lumenvoxSpeech: false
+    lumenvoxSpeech: true
     lumenvoxVb: false
     lumenvoxCommon: true
+  enableItn: false
   asrLanguages:
-    - name: "en"
-      version: "2.2.0"
+    - name: "en"   
   ttsLanguages:
     - name: "en_us"
       voices:
         - name: "chris"
   vbLanguages:
-    - name: "en_US"
+    - name: "en_US"     
+      version: "2.1.15"        
