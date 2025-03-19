@@ -10,9 +10,9 @@ global:
     ingress:
       className: nginx
     loggingVerbosity: "warn"
-    redisTtl: 4h  
+    redisTtl: 4h
   image:
-    tag: ":5.0"  
+    tag: ":5.0"
   rabbitmq:
     enableTLS: false
     connection:
@@ -35,11 +35,15 @@ global:
     lumenvoxCommon: true
   enableItn: false
   asrLanguages:
-    - name: "en"   
+    - name: "en"
   ttsLanguages:
     - name: "en_us"
+      legacyEnabled: false
       voices:
-        - name: "chris"
+        - name: "jeff"
+          version: "3.0"
+        - name: "megan"
+          version: "3.0"
   vbLanguages:
-    - name: "en_US"     
-      version: "2.1.15"        
+    - name: "en_US"
+      version: "2.1.15"
