@@ -915,11 +915,11 @@ if [ $? -ne 0 ]; then
 fi
 
 #############################################
-# Step 9: Install nginx ingrss controller
+# Step 9: Install nginx ingress controller
 #############################################
 
 printf "9. Installing nginx ingress controller...\n" | $TEE -a
-helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx -n ingress-nginx --create-namespace --set controller.hostNetwork=true --version 4.11.3 --set controller.allowSnippetAnnotations=true 1>>$MAIN_LOG 2>>$ERR_LOG
+helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx -n ingress-nginx --create-namespace --set controller.hostNetwork=true --version 4.11.5 --set controller.allowSnippetAnnotations=true 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
     printf "\t\tFailed to install nginx ingress controller\n" | $TEE -a
     exit 1
