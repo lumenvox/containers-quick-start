@@ -112,7 +112,7 @@ this is located in `/etc/hosts`, and for Windows,
 ## Uninstalling
 
 To uninstall from the control plane or a worker node, run the corresponding
-uninstallation script. These scripts require no arguments.
+uninstaller script. These scripts require no arguments.
 
 Because the installation script will optionally install Docker, the
 uninstallation scripts do not uninstall docker. To remove it from your system,

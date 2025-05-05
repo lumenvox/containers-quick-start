@@ -12,7 +12,7 @@ global:
     loggingVerbosity: "warn"
     redisTtl: 4h
   image:
-    tag: ":5.0"
+    tag: ":6.0"
   rabbitmq:
     enableTLS: false
     connection:
