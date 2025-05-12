@@ -439,6 +439,7 @@ mkdir -p /home/$USER/external-services  1>>$MAIN_LOG 2>>$ERR_LOG
 cd /home/$USER/external-services 1>>$MAIN_LOG 2>>$ERR_LOG
 #download files from github
 curl -O https://raw.githubusercontent.com/lumenvox/external-services/master/docker-compose.yaml  1>>$MAIN_LOG 2>>$ERR_LOG
+curl -O https://raw.githubusercontent.com/lumenvox/external-services/master/rabbitmq.conf  1>>$MAIN_LOG 2>>$ERR_LOG
 curl -O https://raw.githubusercontent.com/lumenvox/external-services/master/.env  1>>$MAIN_LOG 2>>$ERR_LOG
 
 # Replace passwords in default .env with collected new password
