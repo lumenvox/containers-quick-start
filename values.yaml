@@ -11,8 +11,6 @@ global:
       className: nginx
     loggingVerbosity: "warn"
     redisTtl: 4h
-  image:
-    tag: ":6.1"
   rabbitmq:
     enableTLS: false
     connection:
@@ -33,7 +31,8 @@ global:
     lumenvoxSpeech: true
     lumenvoxVb: false
     lumenvoxCommon: true
-  enableItn: false
+  itnLanguages:
+    - name: "en"
   asrLanguages:
     - name: "en"
   ttsLanguages:
