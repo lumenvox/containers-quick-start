@@ -26,25 +26,25 @@ done
 ############################################
 printf "\tSetting up postgres-existing-secret...\n"
 
-printf "\t\tPlease enter the required PostgreSQL root password: "
-read -s POSTGRES_POSTGRES_PASS
+#printf "\t\tPlease enter the required PostgreSQL root password: "
+#read -s POSTGRES_PASSWORD
 
 printf "\n\t\tPlease enter the required PostgreSQL user password: "
-read -s POSTGRES_PASS
+read -s POSTGRES_PASSWORD
 printf "\n"
 printf "\tSetting up mongodb-existing-secret...\n"
 printf "\t\tPlease enter the required MongoDB root password: "
-read -s MONGO_ROOT_PASS
+read -s MONGO_INITDB_ROOT_PASSWORD
 printf "\n"
 
 printf "\tSetting up rabbitmq-existing-secret...\n"
 printf "\t\tPlease enter the required RabbitMQ password: "
-read -s RABBIT_PASS
+read -s RABBITMQ_PASSWORD
 printf "\n"
 
 printf "\tSetting up redis-existing-secret...\n"
 printf "\t\tPlease enter the required Redis password: "
-read -s REDIS_PASS
+read -s REDIS_PASSWORD
 printf "\n"
 
 # Program definitions:
@@ -439,13 +439,25 @@ mkdir -p /home/$USER/external-services  1>>$MAIN_LOG 2>>$ERR_LOG
 cd /home/$USER/external-services 1>>$MAIN_LOG 2>>$ERR_LOG
 #download files from github
 curl -O https://raw.githubusercontent.com/lumenvox/external-services/master/docker-compose.yaml  1>>$MAIN_LOG 2>>$ERR_LOG
+# cp /home/$USER/containers-quick-start/docker-compose.yaml .
 curl -O https://raw.githubusercontent.com/lumenvox/external-services/master/rabbitmq.conf  1>>$MAIN_LOG 2>>$ERR_LOG
+# cp /home/$USER/containers-quick-start/.env .
 curl -O https://raw.githubusercontent.com/lumenvox/external-services/master/.env  1>>$MAIN_LOG 2>>$ERR_LOG
 
 # Replace passwords in default .env with collected new password
 filename=/home/$USER/external-services/.env
-key_name=MONGODB__ROOT_PASSWORD
-newvalue=$MONGO_ROOT_PASS
+key_name=MONGO_INITDB_ROOT_PASSWORD
+newvalue=$MONGO_INITDB_ROOT_PASSWORD
+
+#if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
+#  echo "'${key_name}' not found"
+#else
+#  echo "\tSETTING '${key_name}'"
+#  sed -i "s/^[#]*\s*${key_name}=.*/$key_name=$newvalue/" $filename 1>>$MAIN_LOG 2>>$ERR_LOG
+#fi
+
+#key_name=POSTGRES_PASSWORD
+#newvalue=$POSTGRES_PASSWORD
 
 if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
   echo "'${key_name}' not found"
@@ -454,18 +466,8 @@ else
   sed -i "s/^[#]*\s*${key_name}=.*/$key_name=$newvalue/" $filename 1>>$MAIN_LOG 2>>$ERR_LOG
 fi
 
-key_name=POSTGRESQL__POSTGRES_PASSWORD
-newvalue=$POSTGRES_POSTGRES_PASS
-
-if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
-  echo "'${key_name}' not found"
-else
-  echo "\tSETTING '${key_name}'"
-  sed -i "s/^[#]*\s*${key_name}=.*/$key_name=$newvalue/" $filename 1>>$MAIN_LOG 2>>$ERR_LOG
-fi
-
-key_name=POSTGRESQL__PASSWORD
-newvalue=$POSTGRES_PASS
+key_name=POSTGRES_PASSWORD
+newvalue=$POSTGRES_PASSWORD
 
 if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
   echo "'${key_name}' not found"
@@ -474,8 +476,8 @@ else
   sed -i "s/^[#]*\s*${key_name}=.*/$key_name=$newvalue/" $filename  1>>$MAIN_LOG 2>>$ERR_LOG
 fi
 
-key_name=RABBITMQ__PASSWORD
-newvalue=$RABBIT_PASS
+key_name=RABBITMQ_PASSWORD
+newvalue=$RABBITMQ_PASSWORD
 
 if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
   echo "'${key_name}' not found"
@@ -484,8 +486,8 @@ else
   sed -i "s/^[#]*\s*${key_name}=.*/$key_name=$newvalue/" $filename 1>>$MAIN_LOG 2>>$ERR_LOG
 fi
 
-key_name=REDIS__PASSWORD
-newvalue=$REDIS_PASS
+key_name=REDIS_PASSWORD
+newvalue=$REDIS_PASSWORD
 
 if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
   echo "'${key_name}' not found"
@@ -511,10 +513,10 @@ case $DISTRO in
     cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo 1>>$MAIN_LOG 2>>$ERR_LOG
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.30/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.30/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/repodata/repomd.xml.key
 exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
 EOF
     if [ $? -ne 0 ]; then
@@ -564,14 +566,14 @@ EOF
     fi
 
     printf "\tAdding Kubernetes apt repository...\n" | $TEE -a
-    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG >/dev/null
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG >/dev/null
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to add Kubernetes apt repository\n" | $TEE -a
         exit 1
     fi
 
     printf "\tUpdating apt repositories...\n" | $TEE -a
-	curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg  1>>$MAIN_LOG 2>>$ERR_LOG
+	curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg  1>>$MAIN_LOG 2>>$ERR_LOG
     sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to update apt repositories\n" | $TEE -a
@@ -622,8 +624,8 @@ fi
 if ! command -v crictl &> /dev/null
 then
     echo "crictl could not found -> installing"
-	wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.30.0/crictl-v1.30.0-linux-amd64.tar.gz 1>>$MAIN_LOG 2>>$ERR_LOG
-	sudo tar zxvf crictl-v1.30.0-linux-amd64.tar.gz -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
+	wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.31.0/crictl-v1.31.0-linux-amd64.tar.gz 1>>$MAIN_LOG 2>>$ERR_LOG
+	sudo tar zxvf crictl-v1.31.0-linux-amd64.tar.gz -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install crictl" | $TEE -a
         exit 1
@@ -678,7 +680,7 @@ fi
 
 # Install pod network addon
 printf "\tInstalling calico as pod network addon...\n" | $TEE -a
-kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/calico.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
     printf "\t\tFailed to install calico\n" | $TEE -a
     exit 1
@@ -739,6 +741,14 @@ if [ $? -ne 0 ]; then
     printf "\tSystem does not meet requirements for linkerd installation\n" | $TEE -a
     exit 1
 fi
+
+printf "\tCreating the Gateway API custom resources...\n" | $TEE -a
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
+if [ $? -ne 0 ]; then
+    printf "\tLinkerd failed to create the Gateway API on the cluster\n" | $TEE -a
+    exit 1
+fi
+
 
 printf "\tRendering linkerd CRDs...\n" | $TEE -a
 linkerd install --crds 2>&1 1>linkerd_install_crds.yaml | $TEE -a >/dev/null
@@ -874,24 +884,24 @@ if [ $? -ne 0 ]; then
 fi
 
 # Create kubernetes secrets
-kubectl create secret generic mongodb-existing-secret --from-literal=mongodb-root-password=$MONGO_ROOT_PASS -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
+kubectl create secret generic mongodb-existing-secret --from-literal=mongodb-root-password=$MONGO_INITDB_ROOT_PASSWORD -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
     printf "\tFailed to create secret mongodb-existing-secret\n" | $TEE -a
     exit 1
 fi
-kubectl create secret generic postgres-existing-secret --from-literal=postgresql-password=$POSTGRES_PASS --from-literal=postgresql-postgres-password=$POSTGRES_POSTGRES_PASS -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
+kubectl create secret generic postgres-existing-secret --from-literal=postgresql-password=$POSTGRES_PASSWORD  -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
     printf "\tFailed to create secret postgres-existing-secret\n" | $TEE -a
     exit 1
 fi
 
-kubectl create secret generic rabbitmq-existing-secret --from-literal=rabbitmq-password=$RABBIT_PASS -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
+kubectl create secret generic rabbitmq-existing-secret --from-literal=rabbitmq-password=$RABBITMQ_PASSWORD -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
     printf "\tFailed to create secret postgres-existing-secret\n" | $TEE -a
     exit 1
 fi
 
-kubectl create secret generic redis-existing-secret --from-literal=redis-password=$REDIS_PASS -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
+kubectl create secret generic redis-existing-secret --from-literal=redis-password=$REDIS_PASSWORD -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
     printf "\tFailed to create secret redis-existing-secret\n" | $TEE -a
     exit 1
@@ -920,7 +930,7 @@ fi
 #############################################
 
 printf "9. Installing nginx ingress controller...\n" | $TEE -a
-helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx -n ingress-nginx --create-namespace --set controller.hostNetwork=true --version 4.12.1 1>>$MAIN_LOG 2>>$ERR_LOG
+helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx -n ingress-nginx --create-namespace --set controller.hostNetwork=true --version 4.12.4 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
     printf "\t\tFailed to install nginx ingress controller\n" | $TEE -a
     exit 1

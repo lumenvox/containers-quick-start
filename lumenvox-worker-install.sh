@@ -339,10 +339,10 @@ case $DISTRO in
     cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo 1>>$MAIN_LOG 2>>$ERR_LOG
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.30/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.30/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/repodata/repomd.xml.key
 exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
 EOF
     if [ $? -ne 0 ]; then
@@ -392,14 +392,14 @@ EOF
     fi
 
     printf "\tAdding Kubernetes apt repository...\n" | $TEE -a
-    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG >/dev/null
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG >/dev/null
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to add Kubernetes apt repository\n" | $TEE -a
         exit 1
     fi
 
     printf "\tUpdating apt repositories...\n" | $TEE -a
-    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg  1>>$MAIN_LOG 2>>$ERR_LOG
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg  1>>$MAIN_LOG 2>>$ERR_LOG
     sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to update apt repositories\n" | $TEE -a
@@ -450,8 +450,8 @@ fi
 if ! command -v crictl &> /dev/null
 then
     echo "crictl could not found -> installing"
-    wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.30.0/crictl-v1.30.0-linux-amd64.tar.gz 1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo tar zxvf crictl-v1.30.0-linux-amd64.tar.gz -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
+    wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.31.0/crictl-v1.31.0-linux-amd64.tar.gz 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo tar zxvf crictl-v1.31.0-linux-amd64.tar.gz -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install crictl" | $TEE -a
         exit 1
