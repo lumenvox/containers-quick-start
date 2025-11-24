@@ -546,15 +546,15 @@ EOF
         printf "\t\tFailed to install kubernetes components\n" | $TEE -a
         exit 1
     fi
-    sudo yum -y install python3-dnf-plugin-versionlock  1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo yum -y install python3-dnf-plugin-versionlock conntrack  1>>$MAIN_LOG 2>>$ERR_LOG
     sudo yum versionlock kubeadm kubelet kubectl  1>>$MAIN_LOG 2>>$ERR_LOG
     ;;
 
   ubuntu)
     printf "\tInstalling prerequisites...\n" | $TEE -a
-    sudo apt-get install -y apt-transport-https ca-certificates curl 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo apt-get install -y apt-transport-https ca-certificates curl conntrack 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to install prerequisites: apt-transport-https, ca-certificates, curl\n" | $TEE -a
+        printf "\t\tFailed to install prerequisites: apt-transport-https, ca-certificates, curl, conntrack\n" | $TEE -a
         exit 1
     fi
 
