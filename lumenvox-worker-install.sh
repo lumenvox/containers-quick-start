@@ -9,7 +9,7 @@ fi
 # Program definitions:
 MAIN_LOG="main-log.txt"
 ERR_LOG="err-log.txt"
-TEE="tee $MAIN_LOG $ERR_LOG"
+TEE="tee -a $MAIN_LOG $ERR_LOG"
 
 ############################################
 # Kernel pre-requisites
@@ -39,7 +39,7 @@ sudo sysctl --system
 
 # Get OS details
 OS=$(echo `uname`|tr '[:upper:]' '[:lower:]')
-if [ $OS != "linux" ]; then printf "Invalid OS $OS: should be linux.\n"; exit 1; fi
+if [ "$OS" != "linux" ]; then printf "Invalid OS %s: should be linux.\n" "$OS"; exit 1; fi
 DISTRO=$(grep ^ID= /etc/*-release -h | cut -d '=' -f 2 | tr -d '"')
 ARCH=$(uname -m)
 
@@ -75,68 +75,68 @@ case $DISTRO in
     sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
     ;;
   *)
-    printf "Error: distribution '$DISTRO' not supported.\n"  | $TEE -a
+    printf "Error: distribution '$DISTRO' not supported.\n"  | $TEE
     exit 1
     ;;
 esac
 
 # Get swap info, disable it if enabled
 SWAP_DEVICES=$(swapon --show | wc -l)
-if [ $SWAP_DEVICES -gt 0 ]; then
-  printf "Swap must be disabled for Kubernetes to work. It will be disabled by running \`sudo swapoff -a\`. This will work for the installation. \n" | $TEE -a
+if [ "$SWAP_DEVICES" -gt 0 ]; then
+  printf "Swap must be disabled for Kubernetes to work. It will be disabled by running \`sudo swapoff -a\`. This will work for the installation. \n" | $TEE
   sudo swapoff -a 1>>$MAIN_LOG 2>>$ERR_LOG
-  printf "\nAs a permanent solution, the file /etc/fstab has also been edited to disable swap.\n" | $TEE -a
+  printf "\nAs a permanent solution, the file /etc/fstab has also been edited to disable swap.\n" | $TEE
   sudo sed -i '/swap/ s/^\(.*\)$/#\1/g' /etc/fstab 1>>$MAIN_LOG 2>>$ERR_LOG
-  printf "\nFirst requirements validated\n" | $TEE -a
+  printf "\nFirst requirements validated\n" | $TEE
 
 else
-printf "\nSwap is off\n" | $TEE -a
+printf "\nSwap is off\n" | $TEE
 fi
 
 #############################################
 # Uninstall Docker if exists
 #############################################
 
-printf "Verifying if Docker is installed...\n" | $TEE -a
+printf "Verifying if Docker is installed...\n" | $TEE
 
 if command -v docker 1>>$MAIN_LOG 2>>$ERR_LOG; then
     # docker is already installed - needs to be removed
   case $DISTRO in
 
           ubuntu)
-            printf "\t\tUninstalling docker...\n" | $TEE -a
+            printf "\t\tUninstalling docker...\n" | $TEE
             sudo apt-get remove docker docker-engine docker.io runc -y 1>>$MAIN_LOG 2>>$ERR_LOG
             if [ $? -ne 0 ]; then
-                printf "\t\tFailed to uninstall docker\n" | $TEE -a
+                printf "\t\tFailed to uninstall docker\n" | $TEE
                 exit 1
             fi
             sudo apt-get purge docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras -y 1>>$MAIN_LOG 2>>$ERR_LOG
             if [ $? -ne 0 ]; then
-                printf "\t\tFailed to uninstall docker\n" | $TEE -a
+                printf "\t\tFailed to uninstall docker\n" | $TEE
                 exit 1
             fi
             sudo rm -rf /var/lib/docker 1>>$MAIN_LOG 2>>$ERR_LOG
             if [ $? -ne 0 ]; then
-                printf "\t\tFailed to remove docker directories\n" | $TEE -a
+                printf "\t\tFailed to remove docker directories\n" | $TEE
                 exit 1
             fi
             ;;
 
         centos | rhel | rocky)
-            printf "\t\tUninstalling docker...\n" | $TEE -a
+            printf "\t\tUninstalling docker...\n" | $TEE
             sudo yum -y remove docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 1>>$MAIN_LOG 2>>$ERR_LOG
             if [ $? -ne 0 ]; then
-                printf "\t\tFailed to uninstall docker\n" | $TEE -a
+                printf "\t\tFailed to uninstall docker\n" | $TEE
                 exit 1
             fi
             sudo yum -y remove docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
             if [ $? -ne 0 ]; then
-                printf "\t\tFailed to uninstall docker\n" | $TEE -a
+                printf "\t\tFailed to uninstall docker\n" | $TEE
                 exit 1
             fi
             sudo rm -rf /var/lib/docker
             if [ $? -ne 0 ]; then
-                printf "\t\tFailed to remove docker directories\n" | $TEE -a
+                printf "\t\tFailed to remove docker directories\n" | $TEE
                 exit 1
             fi
             ;;
@@ -151,16 +151,16 @@ fi
 #############################################
 # Step 1: Install containerd
 #############################################
-printf "1. Installing containerd...\n" | $TEE -a
+printf "1. Installing containerd...\n" | $TEE
 
 if command -v containerd 1>>$MAIN_LOG 2>>$ERR_LOG; then
     # containerd is already installed - check configuration
     if ! [[ $(sudo cat /etc/containerd/config.toml 2>>$ERR_LOG | grep SystemdCgroup | cut -d' ' -f15) = "true" ]]; then
-        printf "\tContainerd is installed, but it is misconfigured. It should use the SystemdCgroup driver.\n" | $TEE -a
-        printf "\tAttempting to change it...\n" | $TEE -a
+        printf "\tContainerd is installed, but it is misconfigured. It should use the SystemdCgroup driver.\n" | $TEE
+        printf "\tAttempting to change it...\n" | $TEE
         sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-           printf "\t\tFailed to configure SystemdCgroup driver in /etc/containerd/config.toml\n" | $TEE -a
+           printf "\t\tFailed to configure SystemdCgroup driver in /etc/containerd/config.toml\n" | $TEE
            exit 1
         fi
 
@@ -169,27 +169,27 @@ if command -v containerd 1>>$MAIN_LOG 2>>$ERR_LOG; then
         case $DISTRO in
 
        ubuntu)
-            printf "\t\tUpdating apt repositories...\n" | $TEE -a
+            printf "\t\tUpdating apt repositories...\n" | $TEE
             sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://dl.k8s.io/apt/doc/apt-key.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
             sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
             if [ $? -ne 0 ]; then
-                printf "\t\tFailed to update apt repositories\n" | $TEE -a
+                printf "\t\tFailed to update apt repositories\n" | $TEE
                 exit 1
             fi
 
-            printf "\t\tInstalling prerequisites: ca-certificates, curl and gnupg...\n" | $TEE -a
+            printf "\t\tInstalling prerequisites: ca-certificates, curl and gnupg...\n" | $TEE
             sudo apt-get install -y ca-certificates curl gnupg 1>>$MAIN_LOG 2>>$ERR_LOG
             if [ $? -ne 0 ]; then
-                printf "\t\tFailed to install prerequisites\n" | $TEE -a
+                printf "\t\tFailed to install prerequisites\n" | $TEE
                 exit 1
             fi
             ;;
 
           centos | rhel | rocky)
-            printf "\t\tInstalling prerequisites: yum-utils and curl...\n" | $TEE -a
+            printf "\t\tInstalling prerequisites: yum-utils and curl...\n" | $TEE
             sudo yum install -y yum-utils curl 1>>$MAIN_LOG 2>>$ERR_LOG
             if [ $? -ne 0 ]; then
-                printf "\t\tFailed to install yum-utils and/or curl\n" | $TEE -a
+                printf "\t\tFailed to install yum-utils and/or curl\n" | $TEE
                 exit 1
             fi
             ;;
@@ -204,88 +204,88 @@ else
     case $DISTRO in
 
       ubuntu)
-        printf "\tUpdating apt repositories...\n" | $TEE -a
+        printf "\tUpdating apt repositories...\n" | $TEE
         sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to update apt repositories\n" | $TEE -a
+            printf "\t\tFailed to update apt repositories\n" | $TEE
             exit 1
         fi
 
-        printf "\tInstalling prerequisites: ca-certificates, curl, and gnupg...\n" | $TEE -a
+        printf "\tInstalling prerequisites: ca-certificates, curl, and gnupg...\n" | $TEE
         sudo apt-get install -y ca-certificates curl gnupg 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install prerequisites\n" | $TEE -a
+            printf "\t\tFailed to install prerequisites\n" | $TEE
             exit 1
         fi
 
         sudo mkdir -p /etc/apt/keyrings
 
-        printf "\tDownloading official Docker GPG key...\n" | $TEE -a
+        printf "\tDownloading official Docker GPG key...\n" | $TEE
         curl -fsSLo docker.gpg https://download.docker.com/linux/ubuntu/gpg 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to download official Docker GPG key.\n" | $TEE -a
+            printf "\t\tFailed to download official Docker GPG key.\n" | $TEE
             exit 1
         fi
 
-        printf "\tInstalling official Docker GPG key...\n" | $TEE -a
+        printf "\tInstalling official Docker GPG key...\n" | $TEE
         sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg docker.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install official Docker GPG key.\n" | $TEE -a
+            printf "\t\tFailed to install official Docker GPG key.\n" | $TEE
             rm -f docker.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
             if [ $? -ne 0 ]; then
-                printf "\t\tCleanup: failed to remove Docker GPG key.\n" | $TEE -a
+                printf "\t\tCleanup: failed to remove Docker GPG key.\n" | $TEE
             fi
             exit 1
         fi
 
-        printf "\tCleaning up GPG key...\n" | $TEE -a
+        printf "\tCleaning up GPG key...\n" | $TEE
         rm -f docker.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tCleanup: failed to remove leftover docker.gpg. Attempting to proceed...\n" | $TEE -a
+            printf "\t\tCleanup: failed to remove leftover docker.gpg. Attempting to proceed...\n" | $TEE
         fi
 
         # Get architecture and distribution codename
-        printf "\tAdding Docker repository...\n" | $TEE -a
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list 2>&1 1>/dev/null | $TEE -a >/dev/null
+        printf "\tAdding Docker repository...\n" | $TEE
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list | $TEE
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to add docker repository\n" | $TEE -a
+            printf "\t\tFailed to add docker repository\n" | $TEE
             exit 1
         fi
 
-        printf "\tUpdating apt repositories...\n" | $TEE -a
+        printf "\tUpdating apt repositories...\n" | $TEE
         sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to update apt repositories\n" | $TEE -a
+            printf "\t\tFailed to update apt repositories\n" | $TEE
             exit 1
         fi
 
-        printf "\tInstalling containerd...\n" | $TEE -a
+        printf "\tInstalling containerd...\n" | $TEE
         sudo apt-get install -y containerd.io 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install containerd.\n" | $TEE -a
+            printf "\t\tFailed to install containerd.\n" | $TEE
             exit 1
         fi
         ;;
 
       centos | rhel | rocky)
-        printf "\tInstalling yum-utils and curl...\n" | $TEE -a
+        printf "\tInstalling yum-utils and curl...\n" | $TEE
         sudo yum install -y yum-utils curl 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install yum-utils and/or curl\n" | $TEE -a
+            printf "\t\tFailed to install yum-utils and/or curl\n" | $TEE
             exit 1
         fi
 
-        printf "\tAdding yum repo for docker...\n" | $TEE -a
+        printf "\tAdding yum repo for docker...\n" | $TEE
         sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to add yum repo for docker\n" | $TEE -a
+            printf "\t\tFailed to add yum repo for docker\n" | $TEE
             exit 1
         fi
 
-        printf "\tInstalling containerd with yum...\n" | $TEE -a
+        printf "\tInstalling containerd with yum...\n" | $TEE
         sudo yum install -y containerd.io --allowerasing 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install containerd.io\n" | $TEE -a
+            printf "\t\tFailed to install containerd.io\n" | $TEE
             exit 1
         fi
         ;;
@@ -297,31 +297,31 @@ else
         ;;
     esac
 
-    printf "\t\tGetting containerd default configuration...\n" | $TEE -a
+    printf "\t\tGetting containerd default configuration...\n" | $TEE
     containerd config default | sudo tee /etc/containerd/config.toml >/dev/null 2>&1
     if [ $? -ne 0 ]; then
-       printf "\t\tFailed to obtain containerd default configuration\n" | $TEE -a
+       printf "\t\tFailed to obtain containerd default configuration\n" | $TEE
        exit 1
     fi
 
-    printf "\t\tSetting SystemdCgroup as true...\n" | $TEE -a
+    printf "\t\tSetting SystemdCgroup as true...\n" | $TEE
     sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to set SystemdCgroup\n" | $TEE -a
+        printf "\t\tFailed to set SystemdCgroup\n" | $TEE
         exit 1
     fi
 
-    printf "\tRestarting containerd service...\n" | $TEE -a
+    printf "\tRestarting containerd service...\n" | $TEE
     sudo systemctl restart containerd 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to restart containerd service.\n" | $TEE -a
+        printf "\t\tFailed to restart containerd service.\n" | $TEE
         exit 1
     fi
 
-    printf "\tEnabling containerd service...\n" | $TEE -a
+    printf "\tEnabling containerd service...\n" | $TEE
     sudo systemctl enable containerd 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to enable containerd service.\n" | $TEE -a
+        printf "\t\tFailed to enable containerd service.\n" | $TEE
         exit 1
     fi
 fi
@@ -330,46 +330,46 @@ fi
 #############################################
 # Step 2: Install kubernetes components
 #############################################
-printf "2. Installing kubernetes components...\n" | $TEE -a
+printf "2. Installing kubernetes components...\n" | $TEE
 
 case $DISTRO in
 
   centos | rhel | rocky)
-    printf "\tAdding yum repo for kubernetes components...\n" | $TEE -a
+    printf "\tAdding yum repo for kubernetes components...\n" | $TEE
     cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo 1>>$MAIN_LOG 2>>$ERR_LOG
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.33/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.33/rpm/repodata/repomd.xml.key
 exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
 EOF
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to add yum repo at /etc/yum.repos.d/kubernetes.repo\n" | $TEE -a
+        printf "\t\tFailed to add yum repo at /etc/yum.repos.d/kubernetes.repo\n" | $TEE
         exit 1
     fi
 
     if selinuxenabled; then
-        printf "\tSetting SELinux to permissive mode...\n" | $TEE -a
+        printf "\tSetting SELinux to permissive mode...\n" | $TEE
         sudo setenforce 0 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to set SELinux to permissive mode\n" | $TEE -a
+            printf "\t\tFailed to set SELinux to permissive mode\n" | $TEE
             exit 1
         fi
-        printf "\tUpdating SELinux configuration files...\n" | $TEE -a
+        printf "\tUpdating SELinux configuration files...\n" | $TEE
         sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config 1>>$MAIN_LOG 2>>$ERR_LOG
         if [ $? -ne 0 ]; then
-            printf "\t\tFailed to update SELinux configuration files\n" | $TEE -a
+            printf "\t\tFailed to update SELinux configuration files\n" | $TEE
             exit 1
         fi
     fi
 
-    printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
+    printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE
     sudo yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes 1>>$MAIN_LOG 2>>$ERR_LOG
     sudo systemctl enable --now kubelet 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to install kubernetes components\n" | $TEE -a
+        printf "\t\tFailed to install kubernetes components\n" | $TEE
         exit 1
     fi
     sudo yum -y install python3-dnf-plugin-versionlock  1>>$MAIN_LOG 2>>$ERR_LOG
@@ -377,67 +377,66 @@ EOF
     ;;
 
   ubuntu)
-    printf "\tInstalling prerequisites...\n" | $TEE -a
+    printf "\tInstalling prerequisites...\n" | $TEE
     sudo apt-get install -y apt-transport-https ca-certificates curl 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to install prerequisites: apt-transport-https, ca-certificates, curl\n" | $TEE -a
+        printf "\t\tFailed to install prerequisites: apt-transport-https, ca-certificates, curl\n" | $TEE
         exit 1
     fi
 
-    printf "\tAdding Google Cloud public signing key...\n" | $TEE -a
-    sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
+    printf "\tAdding Kubernetes signing key...\n" | $TEE
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to add Google Cloud public signing key.\n" | $TEE -a
+        printf "\t\tFailed to add Kubernetes signing key.\n" | $TEE
         exit 1
     fi
 
-    printf "\tAdding Kubernetes apt repository...\n" | $TEE -a
-    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG >/dev/null
+    printf "\tAdding Kubernetes apt repository...\n" | $TEE
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to add Kubernetes apt repository\n" | $TEE -a
+        printf "\t\tFailed to add Kubernetes apt repository\n" | $TEE
         exit 1
     fi
 
-    printf "\tUpdating apt repositories...\n" | $TEE -a
-    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg  1>>$MAIN_LOG 2>>$ERR_LOG
+    printf "\tUpdating apt repositories...\n" | $TEE
     sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to update apt repositories\n" | $TEE -a
+        printf "\t\tFailed to update apt repositories\n" | $TEE
         exit 1
     fi
 
-    printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
+    printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE
     sudo apt install -y kubelet kubeadm kubectl 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to install kubernetes components\n" | $TEE -a
+        printf "\t\tFailed to install kubernetes components\n" | $TEE
         exit 1
     fi
 
-    printf "\tMarking kubernetes components with hold to prevent automatic update/removal.\n" | $TEE -a
+    printf "\tMarking kubernetes components with hold to prevent automatic update/removal.\n" | $TEE
     sudo apt-mark hold kubelet kubeadm kubectl
 
     ;;
 esac
 
 # This may belong in the ubuntu case; for now, it will run in both cases.
-printf "\tStarting kubelet...\n" | $TEE -a
+printf "\tStarting kubelet...\n" | $TEE
 sudo systemctl enable --now kubelet 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
-    printf "\t\tFailed to start kubelet\n" | $TEE -a
+    printf "\t\tFailed to start kubelet\n" | $TEE
     exit 1
 fi
 
 NET__BRIDGE__BRIDGE_NF_CALL_IPTABLES=$(sysctl net.bridge.bridge-nf-call-iptables 2>>$ERR_LOG)
 if [ $? -ne 0 ]; then
-    printf "\t\tFailed to get value of net.bridge.bridge-nf-call-iptables from sysctl\n" | $TEE -a
+    printf "\t\tFailed to get value of net.bridge.bridge-nf-call-iptables from sysctl\n" | $TEE
     exit 1
 fi
-BRIDGE_NF_CALL_IPTABLES_VAL=$(echo $NET__BRIDGE__BRIDGE_NF_CALL_IPTABLES | cut -d ' ' -f 3)
-if [ $BRIDGE_NF_CALL_IPTABLES_VAL -ne 1 ]; then
-    printf "\tDetected net.bridge.bridge-nf-call-iptables != 1. Setting to 1...\n" | $TEE -a
+BRIDGE_NF_CALL_IPTABLES_VAL=$(echo "$NET__BRIDGE__BRIDGE_NF_CALL_IPTABLES" | cut -d ' ' -f 3)
+if [ "$BRIDGE_NF_CALL_IPTABLES_VAL" -ne 1 ]; then
+    printf "\tDetected net.bridge.bridge-nf-call-iptables != 1. Setting to 1...\n" | $TEE
     sudo sysctl net.bridge.bridge-nf-call-iptables=1 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to set net.bridge.bridge-nf-call-iptables = 1\n" | $TEE -a
+        printf "\t\tFailed to set net.bridge.bridge-nf-call-iptables = 1\n" | $TEE
         exit 1
     fi
 fi
@@ -449,20 +448,27 @@ fi
 # Check if crictl is installed
 if ! command -v crictl &> /dev/null
 then
-    echo "crictl could not found -> installing"
-    wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.31.0/crictl-v1.31.0-linux-amd64.tar.gz 1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo tar zxvf crictl-v1.31.0-linux-amd64.tar.gz -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
+    echo "crictl could not be found -> installing"
+    case "$ARCH" in
+      x86_64) CRICTL_ARCH=amd64 ;;
+      aarch64|arm64) CRICTL_ARCH=arm64 ;;
+      armv7l) CRICTL_ARCH=arm ;;
+      *) CRICTL_ARCH=amd64 ;;  # fallback
+    esac
+    wget "https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.33.0/crictl-v1.33.0-linux-${CRICTL_ARCH}.tar.gz" 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo tar zxvf "crictl-v1.33.0-linux-${CRICTL_ARCH}.tar.gz" -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to install crictl" | $TEE -a
+        printf "\t\tFailed to install crictl\n" | $TEE
         exit 1
     fi
+    rm -f "crictl-v1.33.0-linux-${CRICTL_ARCH}.tar.gz" 1>>$MAIN_LOG 2>>$ERR_LOG
 fi
 
 
-printf "3. Joining control plane...\n" | $TEE -a
+printf "3. Joining control plane...\n" | $TEE
 sudo kubeadm join $1:6443 --token $2 --discovery-token-ca-cert-hash $3 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
-    printf "\tFailed to join control plane\n" | $TEE -a
+    printf "\tFailed to join control plane\n" | $TEE
     exit 1
 fi
 

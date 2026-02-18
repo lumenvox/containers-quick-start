@@ -513,10 +513,10 @@ case $DISTRO in
     cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo 1>>$MAIN_LOG 2>>$ERR_LOG
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.33/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.33/rpm/repodata/repomd.xml.key
 exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
 EOF
     if [ $? -ne 0 ]; then
@@ -546,15 +546,15 @@ EOF
         printf "\t\tFailed to install kubernetes components\n" | $TEE -a
         exit 1
     fi
-    sudo yum -y install python3-dnf-plugin-versionlock conntrack  1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo yum -y install python3-dnf-plugin-versionlock  1>>$MAIN_LOG 2>>$ERR_LOG
     sudo yum versionlock kubeadm kubelet kubectl  1>>$MAIN_LOG 2>>$ERR_LOG
     ;;
 
   ubuntu)
     printf "\tInstalling prerequisites...\n" | $TEE -a
-    sudo apt-get install -y apt-transport-https ca-certificates curl conntrack 1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo apt-get install -y apt-transport-https ca-certificates curl 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
-        printf "\t\tFailed to install prerequisites: apt-transport-https, ca-certificates, curl, conntrack\n" | $TEE -a
+        printf "\t\tFailed to install prerequisites: apt-transport-https, ca-certificates, curl\n" | $TEE -a
         exit 1
     fi
 
@@ -566,14 +566,14 @@ EOF
     fi
 
     printf "\tAdding Kubernetes apt repository...\n" | $TEE -a
-    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG >/dev/null
+    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG >/dev/null
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to add Kubernetes apt repository\n" | $TEE -a
         exit 1
     fi
 
     printf "\tUpdating apt repositories...\n" | $TEE -a
-	curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg  1>>$MAIN_LOG 2>>$ERR_LOG
+	curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg  1>>$MAIN_LOG 2>>$ERR_LOG
     sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to update apt repositories\n" | $TEE -a
@@ -624,8 +624,8 @@ fi
 if ! command -v crictl &> /dev/null
 then
     echo "crictl could not found -> installing"
-	wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.31.0/crictl-v1.31.0-linux-amd64.tar.gz 1>>$MAIN_LOG 2>>$ERR_LOG
-	sudo tar zxvf crictl-v1.31.0-linux-amd64.tar.gz -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
+	wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.33.0/crictl-v1.33.0-linux-amd64.tar.gz 1>>$MAIN_LOG 2>>$ERR_LOG
+	sudo tar zxvf crictl-v1.33.0-linux-amd64.tar.gz -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
     if [ $? -ne 0 ]; then
         printf "\t\tFailed to install crictl" | $TEE -a
         exit 1
@@ -680,7 +680,7 @@ fi
 
 # Install pod network addon
 printf "\tInstalling calico as pod network addon...\n" | $TEE -a
-kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/calico.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
     printf "\t\tFailed to install calico\n" | $TEE -a
     exit 1
@@ -705,7 +705,7 @@ fi
 # Install linkerd CLI
 printf "\tDownloading linkerd install script...\n" | $TEE -a
 # curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install https://run.linkerd.io/install 1>>$MAIN_LOG 2>>$ERR_LOG
-curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install https://lumenvox-public-assets.s3.us-east-1.amazonaws.com/third-party/linkerd/linkerd_install 1>>$MAIN_LOG 2>>$ERR_LOG
+curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install https://assets.lumenvox.com/third-party/linkerd/linkerd_install 1>>$MAIN_LOG 2>>$ERR_LOG
 
 if [ $? -ne 0 ]; then
     printf "\t\tFailed to download linkerd install script\n" | $TEE -a
@@ -930,7 +930,7 @@ fi
 #############################################
 
 printf "9. Installing nginx ingress controller...\n" | $TEE -a
-helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx -n ingress-nginx --create-namespace --set controller.hostNetwork=true --version 4.12.4 1>>$MAIN_LOG 2>>$ERR_LOG
+helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx -n ingress-nginx --create-namespace --set controller.hostNetwork=true --version 4.14.1 1>>$MAIN_LOG 2>>$ERR_LOG
 if [ $? -ne 0 ]; then
     printf "\t\tFailed to install nginx ingress controller\n" | $TEE -a
     exit 1
