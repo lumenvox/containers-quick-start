@@ -1,951 +1,902 @@
 #!/bin/bash
+set -euo pipefail
 
-if [ $# -ne 3 ]; then
-    printf "Usage: ./lumenvox-control-install.sh values.yaml server.key server.crt\n"
+#############################################
+# Usage
+#############################################
+if [ $# -ne 1 ] && [ $# -ne 3 ]; then
+    printf "Usage:\n"
+    printf "  ./lumenvox-control-install.sh values.yaml\n"
+    printf "  ./lumenvox-control-install.sh values.yaml server.key server.crt\n"
     exit 1
 fi
 
-# check if input files exists
-currentdir=`pwd`
-
-printf "\t\tactual path is $currentdir ...\n"
-
-# Check if entered parameters are present
-input_param_check=($1 $2)
-for file in ${input_param_check[@]}; do
-  FILE=file
-if [ ! -f $file ]; then
-    echo "File $file not found!"
-	exit 1
+# Must NOT be run directly as root; must be a sudo-capable user
+if [ "`id -u`" -eq 0 ]; then
+    printf "Error: do not run this script as root. Run as a user with sudo privileges.\n"
+    exit 1
 fi
-done
+if ! sudo -n true 2>/dev/null && ! sudo -v 2>/dev/null; then
+    printf "Error: current user '%s' does not have sudo privileges.\n" "$USER"
+    exit 1
+fi
 
+#############################################
+# Resolve values.yaml to absolute path
+#############################################
+currentdir="`pwd`"
+printf "\t\tactual path is %s ...\n" "$currentdir"
 
-############################################
-# Collect required login passwords
-############################################
-printf "\tSetting up postgres-existing-secret...\n"
+if [ ! -f "$1" ]; then
+    printf "File %s not found!\n" "$1"
+    exit 1
+fi
+VALUES_FILE="`readlink -f "$1"`"
 
-#printf "\t\tPlease enter the required PostgreSQL root password: "
-#read -s POSTGRES_PASSWORD
+#############################################
+# Extract hostnameSuffix from values.yaml
+#############################################
+HOSTNAME_SUFFIX="`grep -E '^\s*hostnameSuffix\s*:' "$VALUES_FILE" \
+    | sed 's/.*hostnameSuffix\s*:\s*//' \
+    | sed 's/[\"'"'"']//g' \
+    | tr -d '[:space:]'`"
 
-printf "\n\t\tPlease enter the required PostgreSQL user password: "
-read -s POSTGRES_PASSWORD
-printf "\n"
-printf "\tSetting up mongodb-existing-secret...\n"
-printf "\t\tPlease enter the required MongoDB root password: "
-read -s MONGO_INITDB_ROOT_PASSWORD
-printf "\n"
+if [ -z "$HOSTNAME_SUFFIX" ]; then
+    printf "Error: could not extract 'hostnameSuffix' from %s.\n" "$VALUES_FILE"
+    exit 1
+fi
+printf "\t\tDetected hostnameSuffix: %s\n" "$HOSTNAME_SUFFIX"
 
-printf "\tSetting up rabbitmq-existing-secret...\n"
-printf "\t\tPlease enter the required RabbitMQ password: "
-read -s RABBITMQ_PASSWORD
-printf "\n"
+#############################################
+# TLS: server.key and server.crt
+#############################################
+build_san() {
+    local s="$1"
+    local san="DNS:lumenvox-api${s}"
+    san="${san}, DNS:biometric-api${s}"
+    san="${san}, DNS:management-api${s}"
+    san="${san}, DNS:reporting-api${s}"
+    san="${san}, DNS:admin-portal${s}"
+    san="${san}, DNS:deployment-portal${s}"
+    san="${san}, DNS:file-store${s}"
+    san="${san}, DNS:grafana${s}"
+    printf '%s' "$san"
+}
 
-printf "\tSetting up redis-existing-secret...\n"
-printf "\t\tPlease enter the required Redis password: "
-read -s REDIS_PASSWORD
-printf "\n"
+generate_server_key() {
+    printf "\tGenerating server.key (RSA 2048-bit)...\n"
+    openssl genrsa -out server.key 2048
+    if [ $? -ne 0 ]; then
+        printf "Error: failed to generate server.key.\n"
+        exit 1
+    fi
+    printf "\t\tserver.key generated.\n"
+    KEY_FILE="`readlink -f server.key`"
+}
 
-# Program definitions:
-MAIN_LOG="main-log.txt"
-ERR_LOG="err-log.txt"
-TEE="tee $MAIN_LOG $ERR_LOG"
+generate_server_crt() {
+    local san cn
+    san="`build_san "$HOSTNAME_SUFFIX"`"
+    cn="${HOSTNAME_SUFFIX#.}"
+    printf "\tGenerating self-signed server.crt (valid 10 years)...\n"
+    printf "\t\tCN: %s\n" "$cn"
+    printf "\t\tSANs: %s\n" "$san"
+    openssl req -new -x509 -sha256 \
+        -key "$KEY_FILE" \
+        -out server.crt \
+        -days 3650 \
+        -subj "/CN=${cn}" \
+        -addext "subjectAltName = ${san}"
+    if [ $? -ne 0 ]; then
+        printf "Error: failed to generate server.crt.\n"
+        exit 1
+    fi
+    printf "\t\tserver.crt generated.\n"
+    CERT_FILE="`readlink -f server.crt`"
+}
 
-############################################
+handle_server_key() {
+    printf "\n\tserver.key options:\n"
+    printf "\t  1) Provide path to an existing server.key\n"
+    printf "\t  2) Generate a new server.key\n"
+    printf "\tChoice [1-2]: "
+    read -r KEY_CHOICE </dev/tty
+    case "$KEY_CHOICE" in
+        1)
+            printf "\tPath to server.key: "
+            read -r KEY_PATH </dev/tty
+            if [ ! -f "$KEY_PATH" ]; then
+                printf "Error: server.key not found at '%s'.\n" "$KEY_PATH"
+                exit 1
+            fi
+            KEY_FILE="`readlink -f "$KEY_PATH"`"
+            printf "\t\tUsing existing server.key: %s\n" "$KEY_FILE"
+            ;;
+        2)
+            generate_server_key
+            ;;
+        *)
+            printf "Error: invalid choice '%s'.\n" "$KEY_CHOICE"
+            exit 1
+            ;;
+    esac
+}
+
+handle_server_crt() {
+    printf "\n\tserver.crt options:\n"
+    printf "\t  1) Provide path to an existing server.crt\n"
+    printf "\t  2) Generate a self-signed server.crt using hostnameSuffix from values.yaml\n"
+    printf "\tChoice [1-2]: "
+    read -r CRT_CHOICE </dev/tty
+    case "$CRT_CHOICE" in
+        1)
+            printf "\tPath to server.crt: "
+            read -r CRT_PATH </dev/tty
+            if [ ! -f "$CRT_PATH" ]; then
+                printf "Error: server.crt not found at '%s'.\n" "$CRT_PATH"
+                exit 1
+            fi
+            CERT_FILE="`readlink -f "$CRT_PATH"`"
+            printf "\t\tUsing existing server.crt: %s\n" "$CERT_FILE"
+            ;;
+        2)
+            generate_server_crt
+            ;;
+        *)
+            printf "Error: invalid choice '%s'.\n" "$CRT_CHOICE"
+            exit 1
+            ;;
+    esac
+}
+
+if [ $# -eq 3 ]; then
+    for f in "$2" "$3"; do
+        if [ ! -f "$f" ]; then
+            printf "File %s not found!\n" "$f"
+            exit 1
+        fi
+    done
+    KEY_FILE="`readlink -f "$2"`"
+    CERT_FILE="`readlink -f "$3"`"
+    printf "\t\tUsing provided server.key: %s\n" "$KEY_FILE"
+    printf "\t\tUsing provided server.crt: %s\n" "$CERT_FILE"
+else
+    printf "\nNo TLS files provided -- entering interactive certificate setup.\n"
+    if ! command -v openssl &>/dev/null; then
+        printf "Error: 'openssl' is required but was not found.\n"
+        exit 1
+    fi
+    handle_server_key
+    handle_server_crt
+fi
+
+#############################################
+# Version configuration
+#############################################
+K8S_VERSION="1.33"
+CRICTL_VERSION="v1.33.0"
+CALICO_VERSION="v3.29.1"
+GATEWAY_API_VERSION="v1.2.1"
+NGINX_INGRESS_VERSION="4.14.1"
+LINKERD_INSTALL_URL="https://assets.lumenvox.com/third-party/linkerd/linkerd_install"
+
+#############################################
+# Minimum hardware requirements
+#############################################
+MIN_CPU_CORES=8
+MIN_RAM_GB=15
+MIN_DISK_GB=150
+
+#############################################
+# Log setup
+#############################################
+MAIN_LOG="$currentdir/main-log.txt"
+ERR_LOG="$currentdir/err-log.txt"
+> "$MAIN_LOG"
+> "$ERR_LOG"
+
+log() { printf "%s\n" "$*" | tee -a "$MAIN_LOG"; }
+err() { printf "%s\n" "$*" | tee -a "$MAIN_LOG" "$ERR_LOG" >&2; }
+die() { err "$*"; exit 1; }
+
+#############################################
+# Step 0: OS detection & validation
+#############################################
+log "0. Detecting OS..."
+
+OS="`uname | tr '[:upper:]' '[:lower:]'`"
+[ "$OS" = "linux" ] || die "Invalid OS '$OS': must be linux."
+
+DISTRO="`grep ^ID= /etc/*-release -h 2>/dev/null | cut -d'=' -f2 | tr -d '\"' | head -1`"
+ARCH="`uname -m`"
+
+case "$DISTRO" in
+  ubuntu) ;;
+  centos | rhel | rocky) ;;
+  almalinux)
+    ALMA_VER="`grep ^VERSION_ID= /etc/*-release -h 2>/dev/null \
+        | cut -d'=' -f2 | tr -d '\"' | cut -d'.' -f1 | head -1`"
+    [ "$ALMA_VER" = "9" ] || die "Error: AlmaLinux version '$ALMA_VER' is not supported. Only AlmaLinux 9 is supported."
+    ;;
+  *)
+    die "Error: distribution '$DISTRO' is not supported."
+    ;;
+esac
+
+log "	Detected: distro=$DISTRO arch=$ARCH"
+
+#############################################
+# Pre-flight checks
+#############################################
+log "0a. Running pre-flight checks..."
+
+CPU_CORES="`nproc --all`"
+log "	Checking CPU cores (minimum ${MIN_CPU_CORES} required)..."
+[ "$CPU_CORES" -ge "$MIN_CPU_CORES" ] || \
+    die "	ERROR: Insufficient CPU cores. Required: ${MIN_CPU_CORES}, Available: ${CPU_CORES}."
+log "		CPU OK: ${CPU_CORES} cores available."
+
+RAM_KB="`awk '/^MemTotal:/{print $2}' /proc/meminfo`"
+RAM_GB=$(( RAM_KB / 1024 / 1024 ))
+log "	Checking RAM (minimum ${MIN_RAM_GB} GB required)..."
+[ "$RAM_GB" -ge "$MIN_RAM_GB" ] || \
+    die "	ERROR: Insufficient RAM. Required: ${MIN_RAM_GB} GB, Available: ${RAM_GB} GB."
+log "		RAM OK: ${RAM_GB} GB available."
+
+DISK_FREE_KB="`df --output=avail / | tail -1`"
+DISK_FREE_GB=$(( DISK_FREE_KB / 1024 / 1024 ))
+log "	Checking available disk space (minimum ${MIN_DISK_GB} GB required)..."
+[ "$DISK_FREE_GB" -ge "$MIN_DISK_GB" ] || \
+    die "	ERROR: Insufficient disk space. Required: ${MIN_DISK_GB} GB, Available: ${DISK_FREE_GB} GB."
+log "		Disk space OK: ${DISK_FREE_GB} GB available."
+
+log "	Checking network connectivity to Kubernetes package repository..."
+curl -fsSL --max-time 10 --silent --output /dev/null "https://pkgs.k8s.io" || \
+    die "	ERROR: Cannot reach https://pkgs.k8s.io. Verify network connectivity and DNS before retrying."
+log "		Kubernetes repository connectivity OK."
+
+#############################################
+# Collect required passwords
+#############################################
+log "0b. Collecting service passwords..."
+
+read_password() {
+    local prompt="$1" varname="$2" val
+    printf "\t\t%s: " "$prompt" >/dev/tty
+    read -rs val </dev/tty
+    printf "\n" >/dev/tty
+    [ -n "$val" ] || die "Error: password for '$prompt' must not be empty."
+    printf -v "$varname" '%s' "$val"
+}
+
+read_password "PostgreSQL user password"  POSTGRES_PASSWORD
+read_password "MongoDB root password"     MONGO_INITDB_ROOT_PASSWORD
+read_password "RabbitMQ password"         RABBITMQ_PASSWORD
+read_password "Redis password"            REDIS_PASSWORD
+
+#############################################
 # Kernel pre-requisites
-############################################
+#############################################
+log "0c. Configuring kernel modules and sysctl..."
 
-sudo tee /etc/modules-load.d/k8s.conf <<EOF
+sudo tee /etc/modules-load.d/k8s.conf >/dev/null <<'KMOD'
 ip_tables
 overlay
 br_netfilter
-EOF
+KMOD
 
-sudo modprobe ip_tables
-sudo modprobe overlay
-sudo modprobe br_netfilter
+for mod in ip_tables overlay br_netfilter; do
+    sudo modprobe "$mod" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || log "	WARNING: failed to modprobe $mod -- may already be built-in."
+done
 
-sudo tee /etc/sysctl.d/k8s.conf <<EOF
+sudo tee /etc/sysctl.d/k8s.conf >/dev/null <<'SYSCTL'
 net.bridge.bridge-nf-call-ip6tables = 1
-net.bridge.bridge-nf-call-iptables = 1
-net.ipv4.ip_forward = 1
-EOF
+net.bridge.bridge-nf-call-iptables  = 1
+net.ipv4.ip_forward                 = 1
+SYSCTL
 
-sudo sysctl --system
+sudo sysctl --system 1>>"$MAIN_LOG" 2>>"$ERR_LOG"
 
 #############################################
-# Step 0: OS and swap detection
+# Firewall / AppArmor / SELinux
 #############################################
+log "1. Disabling firewall and MAC frameworks..."
 
-# Get OS details
-OS=$(echo `uname`|tr '[:upper:]' '[:lower:]')
-if [ $OS != "linux" ]; then printf "Invalid OS $OS: should be linux.\n"; exit 1; fi
-DISTRO=$(grep ^ID= /etc/*-release -h | cut -d '=' -f 2 | tr -d '"')
-ARCH=$(uname -m)
-
-# Exit if unsupported OS
-case $DISTRO in
+case "$DISTRO" in
   ubuntu)
+    for svc in ufw apparmor; do
+        sudo systemctl stop    "$svc" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+        sudo systemctl disable "$svc" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    done
     ;;
-  centos | rhel | rocky)
-    ;;
-  *)
-    printf "Error: distribution '$DISTRO' not supported.\n"  | $TEE -a
-    exit 1
+  centos | rhel | rocky | almalinux)
+    sudo systemctl stop    firewalld 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    sudo systemctl disable firewalld 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    sudo setenforce 0 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    if [ -f /etc/selinux/config ]; then
+        sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+    fi
     ;;
 esac
 
-######################################
-# firewall, apparmor, selinux, etc...
-######################################
-
-case $DISTRO in
-  ubuntu)
-    sudo systemctl stop ufw  1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo systemctl disable ufw  1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo systemctl stop apparmor  1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo systemctl disable apparmor  1>>$MAIN_LOG 2>>$ERR_LOG
-    ;;
-  centos | rhel | rocky)
-    sudo systemctl stop firewalld
-    sudo systemctl disable firewalld
-    sudo setenforce 0
-    sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
-    ;;
-  *)
-    printf "Error: distribution '$DISTRO' not supported.\n"  | $TEE -a
-    exit 1
-    ;;
-esac
-
-# Get swap info, disable it if enabled
-SWAP_DEVICES=$(swapon --show | wc -l)
-if [ $SWAP_DEVICES -gt 0 ]; then
-  printf "Swap must be disabled for Kubernetes to work. It will be disabled by running \`sudo swapoff -a\`. This will work for the installation. \n" | $TEE -a
-  sudo swapoff -a 1>>$MAIN_LOG 2>>$ERR_LOG
-  printf "\nAs a permanent solution, the file /etc/fstab has also been edited to disable swap.\n" | $TEE -a
-  sudo sed -i '/swap/ s/^\(.*\)$/#\1/g' /etc/fstab 1>>$MAIN_LOG 2>>$ERR_LOG
-  printf "\nFirst requirements validated\n" | $TEE -a
-
+#############################################
+# Swap
+#############################################
+SWAP_DEVICES="`swapon --show | wc -l`"
+if [ "$SWAP_DEVICES" -gt 0 ]; then
+    log "	Swap detected -- disabling (required for Kubernetes)..."
+    sudo swapoff -a 1>>"$MAIN_LOG" 2>>"$ERR_LOG"
+    sudo sed -i '/swap/ s/^\(.*\)$/#\1/g' /etc/fstab 1>>"$MAIN_LOG" 2>>"$ERR_LOG"
+    log "	Swap disabled and commented out in /etc/fstab."
 else
-printf "\nSwap is off\n" | $TEE -a
+    log "	Swap is already off."
 fi
 
 #############################################
-# Uninstall Docker if exists
+# Helper: pkg_remove / pkg_install
 #############################################
+pkg_remove() {
+    case "$DISTRO" in
+      ubuntu)
+        sudo apt-get remove -y "$@" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+        ;;
+      centos | rhel | rocky | almalinux)
+        sudo yum -y remove "$@" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+        ;;
+    esac
+}
 
-printf "1. Verifying if Docker is installed...\n" | $TEE -a
+pkg_install() {
+    case "$DISTRO" in
+      ubuntu)
+        sudo apt-get install -y "$@" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "		Failed to install: $*"
+        ;;
+      centos | rhel | rocky | almalinux)
+        sudo yum install -y --allowerasing "$@" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "		Failed to install: $*"
+        ;;
+    esac
+}
 
-if command -v docker 1>>$MAIN_LOG 2>>$ERR_LOG; then
-    # docker is already installed - needs to be removed
-  case $DISTRO in
+#############################################
+# Step 2: Uninstall legacy Docker if present
+#############################################
+log "2. Checking for existing Docker installation..."
 
-          ubuntu)
-            printf "\t\tUninstalling docker...\n" | $TEE -a
-            sudo apt-get remove docker docker-engine docker.io runc -y 1>>$MAIN_LOG 2>>$ERR_LOG
-            if [ $? -ne 0 ]; then
-                printf "\t\tFailed to uninstall docker\n" | $TEE -a
-                exit 1
-            fi
-            sudo apt-get purge docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras -y 1>>$MAIN_LOG 2>>$ERR_LOG
-            if [ $? -ne 0 ]; then
-                printf "\t\tFailed to uninstall docker\n" | $TEE -a
-                exit 1
-            fi
-            sudo rm -rf /var/lib/docker 1>>$MAIN_LOG 2>>$ERR_LOG
-            if [ $? -ne 0 ]; then
-                printf "\t\tFailed to remove docker directories\n" | $TEE -a
-                exit 1
-            fi
-            ;;
-
-        centos | rhel | rocky)
-            printf "\t\tUninstalling docker...\n" | $TEE -a
-            sudo yum -y remove docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 1>>$MAIN_LOG 2>>$ERR_LOG
-            if [ $? -ne 0 ]; then
-                printf "\t\tFailed to uninstall docker\n" | $TEE -a
-                exit 1
-            fi
-            sudo yum -y remove docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
-            if [ $? -ne 0 ]; then
-                printf "\t\tFailed to uninstall docker\n" | $TEE -a
-                exit 1
-            fi
-            sudo rm -rf /var/lib/docker
-            if [ $? -ne 0 ]; then
-                printf "\t\tFailed to remove docker directories\n" | $TEE -a
-                exit 1
-            fi
-            ;;
-          *)
-            printf "Error: distribution '$DISTRO' not supported.\n"
-            exit 1
-            ;;
-  esac
+if command -v docker 1>>"$MAIN_LOG" 2>>"$ERR_LOG"; then
+    log "	Removing existing Docker packages..."
+    case "$DISTRO" in
+      ubuntu)
+        pkg_remove docker docker-engine docker.io runc
+        sudo apt-get purge -y \
+            docker-ce docker-ce-cli docker-buildx-plugin \
+            docker-compose-plugin docker-ce-rootless-extras \
+            1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+        ;;
+      centos | rhel | rocky | almalinux)
+        pkg_remove \
+            docker docker-client docker-client-latest docker-common \
+            docker-latest docker-latest-logrotate docker-logrotate docker-engine \
+            docker-ce docker-ce-cli docker-buildx-plugin \
+            docker-compose-plugin docker-ce-rootless-extras
+        ;;
+    esac
+    sudo rm -rf /var/lib/docker 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to remove /var/lib/docker."
+    log "	Docker removed."
+else
+    log "	Docker not found, skipping removal."
 fi
 
-
 #############################################
-# Step 1: Install containerd.
+# Step 3: Install containerd
 #############################################
-printf "2. Installing containerd...\n" | $TEE
+log "3. Installing containerd..."
 
-if command -v containerd 1>>$MAIN_LOG 2>>$ERR_LOG; then
-    # containerd is already installed - check configuration
-    if ! [[ $(sudo cat /etc/containerd/config.toml 2>>$ERR_LOG | grep SystemdCgroup | cut -d' ' -f15) = "true" ]]; then
-        printf "\tContainerd is installed, but it is misconfigured. It should use the SystemdCgroup driver.\n" | $TEE -a
-        printf "\tAttempting to change it...\n" | $TEE -a
-        sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-           printf "\t\tFailed to configure SystemdCgroup driver in /etc/containerd/config.toml\n" | $TEE -a
-           exit 1
-        fi
+configure_containerd() {
+    log "		Writing default containerd config with SystemdCgroup=true..."
+    containerd config default | sudo tee /etc/containerd/config.toml >/dev/null 2>&1 \
+        || die "		Failed to generate containerd default config."
+    sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to set SystemdCgroup=true."
+    sudo systemctl restart containerd 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to restart containerd."
+    sudo systemctl enable containerd 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to enable containerd."
+}
 
+if command -v containerd 1>>"$MAIN_LOG" 2>>"$ERR_LOG"; then
+    CG_VAL="`sudo grep -m1 SystemdCgroup /etc/containerd/config.toml 2>>"$ERR_LOG" \
+        | awk '{print $NF}'`"
+    if [ "$CG_VAL" != "true" ]; then
+        log "	Containerd present but SystemdCgroup!=true -- fixing..."
+        sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' \
+            /etc/containerd/config.toml 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "		Failed to set SystemdCgroup=true."
+        sudo systemctl restart containerd 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "		Failed to restart containerd after config fix."
     else
-        printf "\tContainerd detected, skipping re-installation. Installing other necessary utilities...\n"
-        case $DISTRO in
-
-       ubuntu)
-            printf "\t\tUpdating apt repositories...\n" | $TEE -a
-			sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://dl.k8s.io/apt/doc/apt-key.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
-            sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
-            if [ $? -ne 0 ]; then
-                printf "\t\tFailed to update apt repositories\n" | $TEE -a
-                exit 1
-            fi
-
-            printf "\t\tInstalling prerequisites: ca-certificates, curl and gnupg...\n" | $TEE -a
-            sudo apt-get install -y ca-certificates curl gnupg 1>>$MAIN_LOG 2>>$ERR_LOG
-            if [ $? -ne 0 ]; then
-                printf "\t\tFailed to install prerequisites\n" | $TEE -a
-                exit 1
-            fi
-            ;;
-
-          centos | rhel | rocky)
-            printf "\t\tInstalling prerequisites: yum-utils and curl...\n" | $TEE -a
-            sudo yum install -y yum-utils curl 1>>$MAIN_LOG 2>>$ERR_LOG
-            if [ $? -ne 0 ]; then
-                printf "\t\tFailed to install yum-utils and/or curl\n" | $TEE -a
-                exit 1
-            fi
-            ;;
-
-          *)
-            printf "Error: distribution '$DISTRO' not supported.\n"
-            exit 1
-            ;;
-        esac
+        log "	Containerd already installed and correctly configured, skipping."
     fi
 else
-    case $DISTRO in
-
+    case "$DISTRO" in
       ubuntu)
-        printf "\tUpdating apt repositories...\n" | $TEE -a
-        sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to update apt repositories\n" | $TEE -a
-            exit 1
-        fi
-
-        printf "\tInstalling prerequisites: ca-certificates, curl, and gnupg...\n" | $TEE -a
-        sudo apt-get install -y ca-certificates curl gnupg 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install prerequisites\n" | $TEE -a
-            exit 1
-        fi
-
+        sudo apt-get update -y 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "		Failed to update apt."
+        pkg_install ca-certificates curl gnupg
         sudo mkdir -p /etc/apt/keyrings
 
-        printf "\tDownloading official Docker GPG key...\n" | $TEE -a
-        curl -fsSLo docker.gpg https://download.docker.com/linux/ubuntu/gpg 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to download official Docker GPG key.\n" | $TEE -a
-            exit 1
-        fi
+        log "	Fetching Docker GPG key..."
+        curl -fsSLo docker.gpg https://download.docker.com/linux/ubuntu/gpg \
+            1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "		Failed to download Docker GPG key."
+        sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg docker.gpg \
+            1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            && rm -f docker.gpg \
+            || { rm -f docker.gpg; die "		Failed to install Docker GPG key."; }
 
-        printf "\tInstalling official Docker GPG key...\n" | $TEE -a
-        sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg docker.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install official Docker GPG key.\n" | $TEE -a
-            rm -f docker.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
-            if [ $? -ne 0 ]; then
-                printf "\t\tCleanup: failed to remove Docker GPG key.\n" | $TEE -a
-            fi
-            exit 1
-        fi
+        DPKG_ARCH="`dpkg --print-architecture`"
+        UBUNTU_CODENAME="`lsb_release -cs`"
+        echo "deb [arch=${DPKG_ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${UBUNTU_CODENAME} stable" \
+            | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null \
+            || die "		Failed to add Docker repository."
 
-        printf "\tCleaning up GPG key...\n" | $TEE -a
-        rm -f docker.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tCleanup: failed to remove leftover docker.gpg. Attempting to proceed...\n" | $TEE -a
-        fi
-
-        # Get architecture and distribution codename
-        printf "\tAdding Docker repository...\n" | $TEE -a
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list 2>&1 1>/dev/null | $TEE -a >/dev/null
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to add docker repository\n" | $TEE -a
-            exit 1
-        fi
-
-        printf "\tUpdating apt repositories...\n" | $TEE -a
-        sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to update apt repositories\n" | $TEE -a
-            exit 1
-        fi
-
-        printf "\tInstalling containerd...\n" | $TEE -a
-        sudo apt-get install -y containerd.io 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install containerd.\n" | $TEE -a
-            exit 1
-        fi
+        sudo apt-get update -y 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "		Failed to update apt after adding Docker repo."
+        pkg_install containerd.io
         ;;
 
-      centos | rhel | rocky)
-        printf "\tInstalling yum-utils and curl...\n" | $TEE -a
-        sudo yum install -y yum-utils curl 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install yum-utils and/or curl\n" | $TEE -a
-            exit 1
-        fi
-
-        printf "\tAdding yum repo for docker...\n" | $TEE -a
-        sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to add yum repo for docker\n" | $TEE -a
-            exit 1
-        fi
-
-        printf "\tInstalling containerd with yum...\n" | $TEE -a
-        sudo yum install -y containerd.io --allowerasing 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install containerd.io\n" | $TEE -a
-            exit 1
-        fi
-        ;;
-
-
-      *)
-        printf "Error: distribution '$DISTRO' not supported.\n"
-        exit 1
+      centos | rhel | rocky | almalinux)
+        sudo yum install -y yum-utils curl 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "		Failed to install yum-utils and curl from base OS repos."
+        sudo yum-config-manager --add-repo \
+            https://download.docker.com/linux/centos/docker-ce.repo \
+            1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "		Failed to add Docker yum repo."
+        pkg_install containerd.io
         ;;
     esac
 
-    printf "\t\tGetting containerd default configuration...\n" | $TEE -a
-    containerd config default | sudo tee /etc/containerd/config.toml >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-       printf "\t\tFailed to obtain containerd default configuration\n" | $TEE -a
-       exit 1
-    fi
-
-    printf "\t\tSetting SystemdCgroup as true...\n" | $TEE -a
-    sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to set SystemdCgroup\n" | $TEE -a
-        exit 1
-    fi
-
-    printf "\tRestarting containerd service...\n" | $TEE -a
-    sudo systemctl restart containerd 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to restart containerd service.\n" | $TEE -a
-        exit 1
-    fi
-
-    printf "\tEnabling containerd service...\n" | $TEE -a
-    sudo systemctl enable containerd 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to enable containerd service.\n" | $TEE -a
-        exit 1
-    fi
+    configure_containerd
 fi
-##########################################################
-# Step 2: Install Docker for external services and mrcp-api
-##########################################################
 
-case $DISTRO in
+#############################################
+# Step 4: Install Docker
+#############################################
+log "4. Installing Docker engine..."
 
-      ubuntu)
+pkg_install docker-ce docker-ce-cli docker-compose-plugin
 
-        printf "\tInstalling docker components for external services and mrcp-api...\n" | $TEE -a
-        sudo apt-get install -y docker-ce docker-ce-cli docker-compose-plugin 1>>$MAIN_LOG 2>>$ERR_LOG
-#        if [ $? -ne 0 ]; then
-#            printf "\t\tFailed to install docker components.\n" | $TEE -a
-#            exit 1
-#        fi
-        ;;
-
-      centos | rhel | rocky)
-
-        printf "\tInstalling docker components with yum, for external services and mrcp-api...\n" | $TEE -a
-        sudo yum install -y docker-ce docker-ce-cli docker-compose-plugin --allowerasing 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to install docker components\n" | $TEE -a
-            exit 1
-        fi
-        ;;
-
-
-      *)
-        printf "Error: distribution '$DISTRO' not supported.\n"
-        exit 1
-        ;;
-esac
-
-
-printf "\tStarting docker service...\n" | $TEE -a
+log "	Starting Docker service..."
 DOCKER_START_ATTEMPT_COUNTER=0
 DOCKER_START_ATTEMPT_MAX=10
-while [ $DOCKER_START_ATTEMPT_COUNTER -lt $DOCKER_START_ATTEMPT_MAX ]; do
-	sudo systemctl start docker 1>>$MAIN_LOG 2>>$ERR_LOG
-	if [ $? -ne 0 ]; then
-		DOCKER_START_ATTEMPT_COUNTER=$(( $DOCKER_START_ATTEMPT_COUNTER + 1 ))
-		printf "\t\tsystemctl start docker: failed attempt #$DOCKER_START_ATTEMPT_COUNTER." | $TEE -a
-	if [ $DOCKER_START_ATTEMPT_COUNTER -eq $DOCKER_START_ATTEMPT_MAX ]; then
-			printf " Maximum numbers of attempts reached. Wait a few minutes and try again.\n" | $TEE -a
-		exit 1
-	else
-			printf " Sleeping 30 seconds and retrying...\n" | $TEE -a
-		sleep 30s
-	fi
-	else
-		break
-	fi
+until sudo systemctl start docker 1>>"$MAIN_LOG" 2>>"$ERR_LOG"; do
+    DOCKER_START_ATTEMPT_COUNTER=$(( DOCKER_START_ATTEMPT_COUNTER + 1 ))
+    log "		systemctl start docker: failed attempt #${DOCKER_START_ATTEMPT_COUNTER}."
+    [ "$DOCKER_START_ATTEMPT_COUNTER" -lt "$DOCKER_START_ATTEMPT_MAX" ] \
+        || die "		Maximum start attempts reached. Wait a few minutes and try again."
+    log "		Sleeping 30 seconds and retrying..."
+    sleep 30
 done
 
+sudo systemctl enable docker 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to enable Docker."
 
-
-printf "\tEnabling Docker.\n"  | $TEE -a
-sudo systemctl enable docker 1>>$MAIN_LOG 2>>$ERR_LOG
-  if [ $? -ne 0 ]; then
-      printf "\t\tFailed to enable docker\n" | $TEE -a
-      exit 1
-  fi
-
-printf "\tAllowing non-root access to Docker.\n"  | $TEE -a
-sudo usermod -aG docker $USER 1>>$MAIN_LOG 2>>$ERR_LOG
-  if [ $? -ne 0 ]; then
-      printf "\t\tFailed to add user to docker group\n" | $TEE -a
-      exit 1
-  fi
-
-#create directories for external-services docker compose files
-mkdir -p /home/$USER/external-services  1>>$MAIN_LOG 2>>$ERR_LOG
-cd /home/$USER/external-services 1>>$MAIN_LOG 2>>$ERR_LOG
-#download files from github
-curl -O https://raw.githubusercontent.com/lumenvox/external-services/master/docker-compose.yaml  1>>$MAIN_LOG 2>>$ERR_LOG
-# cp /home/$USER/containers-quick-start/docker-compose.yaml .
-curl -O https://raw.githubusercontent.com/lumenvox/external-services/master/rabbitmq.conf  1>>$MAIN_LOG 2>>$ERR_LOG
-# cp /home/$USER/containers-quick-start/.env .
-curl -O https://raw.githubusercontent.com/lumenvox/external-services/master/.env  1>>$MAIN_LOG 2>>$ERR_LOG
-
-# Replace passwords in default .env with collected new password
-filename=/home/$USER/external-services/.env
-key_name=MONGO_INITDB_ROOT_PASSWORD
-newvalue=$MONGO_INITDB_ROOT_PASSWORD
-
-#if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
-#  echo "'${key_name}' not found"
-#else
-#  echo "\tSETTING '${key_name}'"
-#  sed -i "s/^[#]*\s*${key_name}=.*/$key_name=$newvalue/" $filename 1>>$MAIN_LOG 2>>$ERR_LOG
-#fi
-
-#key_name=POSTGRES_PASSWORD
-#newvalue=$POSTGRES_PASSWORD
-
-if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
-  echo "'${key_name}' not found"
-else
-  echo "\tSETTING '${key_name}'"
-  sed -i "s/^[#]*\s*${key_name}=.*/$key_name=$newvalue/" $filename 1>>$MAIN_LOG 2>>$ERR_LOG
-fi
-
-key_name=POSTGRES_PASSWORD
-newvalue=$POSTGRES_PASSWORD
-
-if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
-  echo "'${key_name}' not found"
-else
-  echo "\tSETTING '${key_name}'"
-  sed -i "s/^[#]*\s*${key_name}=.*/$key_name=$newvalue/" $filename  1>>$MAIN_LOG 2>>$ERR_LOG
-fi
-
-key_name=RABBITMQ_PASSWORD
-newvalue=$RABBITMQ_PASSWORD
-
-if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
-  echo "'${key_name}' not found"
-else
-  echo "\tSETTING '${key_name}'"
-  sed -i "s/^[#]*\s*${key_name}=.*/$key_name=$newvalue/" $filename 1>>$MAIN_LOG 2>>$ERR_LOG
-fi
-
-key_name=REDIS_PASSWORD
-newvalue=$REDIS_PASSWORD
-
-if ! grep -R "^[#]*\s*${key_name}=.*" $filename > /dev/null; then
-  echo "'${key_name}' not found"
-else
-  echo "SETTING '${key_name}'"
-  sed -i "s/^[#]*\s*${key_name}=.*/$key_name=$newvalue/" $filename  1>>$MAIN_LOG 2>>$ERR_LOG
-fi
-
-
-#install external-services
-sudo docker compose up -d  1>>$MAIN_LOG 2>>$ERR_LOG
-cd /home/$USER/  1>>$MAIN_LOG 2>>$ERR_LOG
+REAL_USER="$USER"
+sudo usermod -aG docker "$REAL_USER" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to add $REAL_USER to docker group."
 
 #############################################
-# Step 3: Install kubernetes components
+# Step 5: Deploy external-services
 #############################################
-printf "3. Installing kubernetes components...\n" | $TEE -a
+log "5. Deploying external-services..."
 
-case $DISTRO in
+EXT_SVC_DIR="/home/$REAL_USER/external-services"
+mkdir -p "$EXT_SVC_DIR" 1>>"$MAIN_LOG" 2>>"$ERR_LOG"
 
-  centos | rhel | rocky)
-    printf "\tAdding yum repo for kubernetes components...\n" | $TEE -a
-    cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo 1>>$MAIN_LOG 2>>$ERR_LOG
+BASE_URL="https://raw.githubusercontent.com/lumenvox/external-services/master"
+for fname in docker-compose.yaml rabbitmq.conf .env; do
+    curl -fsSL -o "$EXT_SVC_DIR/$fname" "$BASE_URL/$fname" \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to download $fname from $BASE_URL."
+done
+
+ENV_FILE="$EXT_SVC_DIR/.env"
+
+set_env_var() {
+    local key="$1" val="$2" escaped_val
+    if grep -qE "^[#]*\s*${key}=" "$ENV_FILE"; then
+        escaped_val="`printf '%s' "$val" | sed 's/[\/&]/\\&/g'`"
+        sed -i "s|^[#]*\s*${key}=.*|${key}=${escaped_val}|" "$ENV_FILE" \
+            1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "		Failed to set $key in $ENV_FILE."
+        log "		Set '$key' in $ENV_FILE."
+    else
+        log "		WARNING: key '$key' not found in $ENV_FILE -- skipping."
+    fi
+}
+
+set_env_var MONGO_INITDB_ROOT_PASSWORD "$MONGO_INITDB_ROOT_PASSWORD"
+set_env_var POSTGRES_PASSWORD          "$POSTGRES_PASSWORD"
+set_env_var RABBITMQ_PASSWORD          "$RABBITMQ_PASSWORD"
+set_env_var REDIS_PASSWORD             "$REDIS_PASSWORD"
+
+( cd "$EXT_SVC_DIR" && sudo docker compose up -d 1>>"$MAIN_LOG" 2>>"$ERR_LOG" ) \
+    || die "		Failed to start external-services."
+
+#############################################
+# Step 6: Install Kubernetes components
+#############################################
+log "6. Installing Kubernetes components..."
+
+case "$DISTRO" in
+  centos | rhel | rocky | almalinux)
+    if [ "$DISTRO" = "almalinux" ]; then
+        log "	Verifying iptables-nft is present on AlmaLinux 9..."
+        pkg_install iptables-nft
+    fi
+
+    sudo tee /etc/yum.repos.d/kubernetes.repo >/dev/null <<KUBErepo
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.33/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.33/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/repodata/repomd.xml.key
 exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
-EOF
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to add yum repo at /etc/yum.repos.d/kubernetes.repo\n" | $TEE -a
-        exit 1
-    fi
+KUBErepo
 
-    if selinuxenabled; then
-        printf "\tSetting SELinux to permissive mode...\n" | $TEE -a
-        sudo setenforce 0 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to set SELinux to permissive mode\n" | $TEE -a
-            exit 1
-        fi
-        printf "\tUpdating SELinux configuration files...\n" | $TEE -a
-        sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config 1>>$MAIN_LOG 2>>$ERR_LOG
-        if [ $? -ne 0 ]; then
-            printf "\t\tFailed to update SELinux configuration files\n" | $TEE -a
-            exit 1
+    if selinuxenabled 2>/dev/null; then
+        log "	Setting SELinux to permissive..."
+        sudo setenforce 0 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+        if [ -f /etc/selinux/config ]; then
+            sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
         fi
     fi
 
-    printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
-    sudo yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes 1>>$MAIN_LOG 2>>$
-    sudo systemctl enable --now kubelet 1>>$MAIN_LOG 2>>$
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to install kubernetes components\n" | $TEE -a
-        exit 1
-    fi
-    sudo yum -y install python3-dnf-plugin-versionlock  1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo yum versionlock kubeadm kubelet kubectl  1>>$MAIN_LOG 2>>$ERR_LOG
+    sudo yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to install Kubernetes components."
+    sudo systemctl enable --now kubelet 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+
+    sudo yum -y install python3-dnf-plugin-versionlock 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    sudo yum versionlock kubeadm kubelet kubectl       1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
     ;;
 
   ubuntu)
-    printf "\tInstalling prerequisites...\n" | $TEE -a
-    sudo apt-get install -y apt-transport-https ca-certificates curl 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to install prerequisites: apt-transport-https, ca-certificates, curl\n" | $TEE -a
-        exit 1
-    fi
+    pkg_install apt-transport-https ca-certificates curl
+    sudo mkdir -p /etc/apt/keyrings
 
-    printf "\tAdding Google Cloud public signing key...\n" | $TEE -a
-    sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to add Google Cloud public signing key.\n" | $TEE -a
-        exit 1
-    fi
+    curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/deb/Release.key" \
+        | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to add Kubernetes GPG key."
 
-    printf "\tAdding Kubernetes apt repository...\n" | $TEE -a
-    echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list 2>>$ERR_LOG >/dev/null
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to add Kubernetes apt repository\n" | $TEE -a
-        exit 1
-    fi
+    echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/deb/ /" \
+        | sudo tee /etc/apt/sources.list.d/kubernetes.list >/dev/null \
+        || die "		Failed to add Kubernetes apt repository."
 
-    printf "\tUpdating apt repositories...\n" | $TEE -a
-	curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg  1>>$MAIN_LOG 2>>$ERR_LOG
-    sudo apt-get update -y 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to update apt repositories\n" | $TEE -a
-        exit 1
-    fi
+    sudo apt-get update -y 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to update apt."
+    pkg_install kubelet kubeadm kubectl
 
-    printf "\tInstalling kubernetes components: kubelet, kubeadm, kubectl...\n" | $TEE -a
-    sudo apt install -y kubelet kubeadm kubectl 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to install kubernetes components\n" | $TEE -a
-        exit 1
-    fi
-
-    printf "\tMarking kubernetes components with hold to prevent automatic update/removal.\n" | $TEE -a
-    sudo apt-mark hold kubelet kubeadm kubectl
-
+    sudo apt-mark hold kubelet kubeadm kubectl \
+        || die "		Failed to hold Kubernetes packages."
     ;;
 esac
 
-# This may belong in the ubuntu case; for now, it will run in both cases.
-printf "\tStarting kubelet...\n" | $TEE -a
-sudo systemctl enable --now kubelet 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to start kubelet\n" | $TEE -a
-    exit 1
+sudo systemctl enable --now kubelet 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to enable/start kubelet."
+
+BRIDGE_VAL="`sysctl -n net.bridge.bridge-nf-call-iptables 2>>"$ERR_LOG" || echo 0`"
+if [ "$BRIDGE_VAL" -ne 1 ]; then
+    log "	Setting net.bridge.bridge-nf-call-iptables=1..."
+    sudo sysctl net.bridge.bridge-nf-call-iptables=1 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to set net.bridge.bridge-nf-call-iptables=1."
 fi
 
-NET__BRIDGE__BRIDGE_NF_CALL_IPTABLES=$(sysctl net.bridge.bridge-nf-call-iptables 2>>$ERR_LOG)
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to get value of net.bridge.bridge-nf-call-iptables from sysctl\n" | $TEE -a
-    exit 1
+#############################################
+# Step 7: Initialize control plane
+#############################################
+if ! command -v crictl &>/dev/null; then
+    log "	crictl not found -- installing..."
+    CRICTL_TAR="crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz"
+    curl -fsSLO \
+        "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/${CRICTL_TAR}" \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to download crictl."
+    sudo tar zxvf "$CRICTL_TAR" -C /usr/local/bin 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to extract crictl."
+    rm -f "$CRICTL_TAR"
 fi
-BRIDGE_NF_CALL_IPTABLES_VAL=$(echo $NET__BRIDGE__BRIDGE_NF_CALL_IPTABLES | cut -d ' ' -f 3)
-if [ $BRIDGE_NF_CALL_IPTABLES_VAL -ne 1 ]; then
-    printf "\tDetected net.bridge.bridge-nf-call-iptables != 1. Setting to 1...\n" | $TEE -a
-    sudo sysctl net.bridge.bridge-nf-call-iptables=1 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to set net.bridge.bridge-nf-call-iptables = 1\n" | $TEE -a
-        exit 1
+
+log "7. Initializing Kubernetes control plane..."
+
+if sudo test -d /etc/kubernetes/pki 2>/dev/null \
+        || sudo test -d /etc/kubernetes/manifests 2>/dev/null; then
+    log "	Stale Kubernetes state detected -- running kubeadm reset before init..."
+    sudo kubeadm reset --force 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    sudo rm -rf /etc/kubernetes/pki       1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    sudo rm -rf /etc/kubernetes/manifests 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    sudo rm -rf /var/lib/etcd             1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    sudo rm -rf "$HOME/.kube"             1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    log "	Stale state cleared."
+fi
+
+sudo kubeadm init 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to initialize control plane."
+
+#############################################
+# Step 8: First-time cluster setup
+#############################################
+log "8. Performing first-time cluster setup..."
+
+KUBE_HOME="`getent passwd "$REAL_USER" | cut -d: -f6`/.kube"
+mkdir -p "$KUBE_HOME" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to create $KUBE_HOME."
+sudo cp /etc/kubernetes/admin.conf "$KUBE_HOME/config" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to copy admin.conf."
+sudo chown "$REAL_USER:$REAL_USER" "$KUBE_HOME/config" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to set ownership of $KUBE_HOME/config."
+chmod 600 "$KUBE_HOME/config" \
+    || die "		Failed to set permissions on $KUBE_HOME/config."
+log "		kubectl configured at $KUBE_HOME/config."
+
+log "	Waiting for Kubernetes API server to become ready..."
+API_WAIT_ATTEMPTS=0
+API_WAIT_MAX=24
+until kubectl get nodes 1>>"$MAIN_LOG" 2>>"$ERR_LOG"; do
+    API_WAIT_ATTEMPTS=$(( API_WAIT_ATTEMPTS + 1 ))
+    [ "$API_WAIT_ATTEMPTS" -lt "$API_WAIT_MAX" ] \
+        || die "	API server did not become ready after $(( API_WAIT_MAX * 5 )) seconds."
+    log "		API server not ready yet (attempt ${API_WAIT_ATTEMPTS}/${API_WAIT_MAX}) -- retrying in 5 seconds..."
+    sleep 5
+done
+log "	API server is ready."
+
+log "	Waiting for node to register with the cluster..."
+NODE=""
+NODE_WAIT_ATTEMPTS=0
+NODE_WAIT_MAX=24
+until [ -n "$NODE" ]; do
+    NODE="`kubectl get no -o custom-columns=NAME:.metadata.name --no-headers \
+        2>>"$ERR_LOG" | head -1`"
+    if [ -z "$NODE" ]; then
+        NODE_WAIT_ATTEMPTS=$(( NODE_WAIT_ATTEMPTS + 1 ))
+        [ "$NODE_WAIT_ATTEMPTS" -lt "$NODE_WAIT_MAX" ] \
+            || die "		Node did not register after $(( NODE_WAIT_MAX * 5 )) seconds."
+        log "		Node not registered yet (attempt ${NODE_WAIT_ATTEMPTS}/${NODE_WAIT_MAX}) -- retrying in 5 seconds..."
+        sleep 5
     fi
-fi
+done
+log "		Node registered: $NODE"
+
+log "	Removing control-plane NoSchedule taint..."
+kubectl taint node "$NODE" node-role.kubernetes.io/control-plane- \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to remove NoSchedule taint from $NODE."
+
+log "	Installing Calico CNI..."
+kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml" \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to install Calico."
+
+log "	Waiting for node '$NODE' to become Ready (this may take a few minutes)..."
+NODE_READY_ATTEMPTS=0
+NODE_READY_MAX=36
+until kubectl get node "$NODE" --no-headers 2>>"$ERR_LOG" \
+        | awk '{print $2}' | grep -q "^Ready$"; do
+    NODE_READY_ATTEMPTS=$(( NODE_READY_ATTEMPTS + 1 ))
+    [ "$NODE_READY_ATTEMPTS" -lt "$NODE_READY_MAX" ] \
+        || die "		Node '$NODE' did not become Ready after $(( NODE_READY_MAX * 10 )) seconds."
+    log "		Node not Ready yet (attempt ${NODE_READY_ATTEMPTS}/${NODE_READY_MAX}) -- retrying in 10 seconds..."
+    sleep 10
+done
+log "		Node '$NODE' is Ready."
 
 #############################################
-# Step 4: Initialize control plane
+# Step 9: Install Linkerd
 #############################################
+log "9. Installing Linkerd..."
 
-# Check if crictl is installed
-if ! command -v crictl &> /dev/null
-then
-    echo "crictl could not found -> installing"
-	wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.33.0/crictl-v1.33.0-linux-amd64.tar.gz 1>>$MAIN_LOG 2>>$ERR_LOG
-	sudo tar zxvf crictl-v1.33.0-linux-amd64.tar.gz -C /usr/local/bin 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to install crictl" | $TEE -a
-        exit 1
-    fi
+if ! lsmod | grep -q ip_tables; then
+    log "	ip_tables module not loaded -- loading now..."
+    sudo modprobe ip_tables 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || log "		WARNING: Could not load ip_tables. Attempting to proceed."
 fi
 
+curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install \
+    "$LINKERD_INSTALL_URL" \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to download Linkerd install script."
 
-
-printf "4. Initializing control plane...\n" | $TEE -a
-sudo kubeadm init 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to initialize control plane\n" | $TEE -a
-    exit 1
-fi
-
-#############################################
-# Step 5: Peform first-time setup for the cluster
-#############################################
-printf "5. Performing first-time setup...\n" | $TEE -a
-
-printf "\tUpdating kubectl to allow non-root usage...\n" | $TEE -a
-mkdir -p $HOME/.kube 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to create directory $HOME/.kube\n" | $TEE -a
-    exit 1
-fi
-sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to copy /etc/kubernetes/admin.conf to $HOME/.kube/config\n" | $TEE -a
-    exit 1
-fi
-sudo chown $USER:$USER $HOME/.kube/config 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to change ownership of $HOME/.kube/config\n" | $TEE -a
-    exit 1
-fi
-
-# Allow control plane to schedule pods
-printf "\tGetting name of node...\n" | $TEE -a
-NODE=$(kubectl get no -o custom-columns=NAME:.metadata.name --no-headers 2>>$ERR_LOG)
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to get name of node\n" | $TEE -a
-    exit 1
-fi
-
-printf "\tRemoving control-plane NoSchedule taint from control plane...\n" | $TEE -a
-kubectl taint node $NODE node-role.kubernetes.io/control-plane- 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to remove NoSchedule taint from node $NODE\n" | $TEE -a
-    exit 1
-fi
-
-# Install pod network addon
-printf "\tInstalling calico as pod network addon...\n" | $TEE -a
-kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to install calico\n" | $TEE -a
-    exit 1
-fi
-
-#############################################
-# Step 6: Install linkerd on the cluster
-#############################################
-printf "6. Installing linkerd on cluster...\n" | $TEE -a
-
-# Check for ip_tables module, required to start linkerd pods
-if ! lsmod | grep ip_tables >/dev/null 2>&1; then
-    printf "\tip_tables module not detected, attempting to load...\n" | $TEE -a
-    sudo modprobe ip_tables 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tFailed to load ip_tables module. Attempting to proceed...\n" | $TEE -a
-    fi
-    printf "\t\t\tNOTE: ip_tables was manually loaded. To ensure that the cluster works after a server restart, you should add ip_tables to modules.conf with the following command:\n"
-    printf "\t\t\t\techo \"ip_tables\" | sudo tee -a /etc/modules-load.d/modules.conf >/dev/null\n"
-fi
-
-# Install linkerd CLI
-printf "\tDownloading linkerd install script...\n" | $TEE -a
-# curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install https://run.linkerd.io/install 1>>$MAIN_LOG 2>>$ERR_LOG
-curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install https://assets.lumenvox.com/third-party/linkerd/linkerd_install 1>>$MAIN_LOG 2>>$ERR_LOG
-
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to download linkerd install script\n" | $TEE -a
-    exit 1
-fi
-
-printf "\tInstalling linkerd CLI...\n" | $TEE -a
 chmod +x linkerd_install
-./linkerd_install 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to install linkerd CLI\n" | $TEE -a
-    rm -f linkerd_install
-    if [ $? -ne 0 ]; then
-        printf "\t\tCleanup: failed to remove linkerd_install\n" | $TEE -a
-    fi
-    exit 1
-fi
+./linkerd_install 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || { rm -f linkerd_install; die "		Failed to install Linkerd CLI."; }
+rm -f linkerd_install
 
-printf "\tRemoving installation script...\n" | $TEE -a
-rm -f linkerd_install 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to remove linkerd install script. Attempting to proceed...\n" | $TEE -a
-fi
+export PATH="$PATH:$HOME/.linkerd2/bin"
 
-# Add linkerd to path
-PATH=$PATH:~/.linkerd2/bin
+log "	Running Linkerd pre-check..."
+linkerd check --pre 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	System does not meet Linkerd requirements."
 
-# Install linkerd on the cluster
+log "	Applying Gateway API CRDs..."
+kubectl apply \
+    -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml" \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to apply Gateway API CRDs."
 
-printf "\tPerforming linkerd pre-check...\n" | $TEE -a
-linkerd check --pre 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tSystem does not meet requirements for linkerd installation\n" | $TEE -a
-    exit 1
-fi
+linkerd_apply() {
+    local label="$1" outfile="$2"
+    shift 2
+    log "	Rendering ${label}..."
+    "$@" >"$outfile" 2>>"$ERR_LOG" \
+        || { rm -f "$outfile"; die "	Failed to render ${label}."; }
+    log "	Applying ${label}..."
+    kubectl apply -f "$outfile" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || { rm -f "$outfile"; die "	Failed to apply ${label}."; }
+    rm -f "$outfile"
+}
 
-printf "\tCreating the Gateway API custom resources...\n" | $TEE -a
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tLinkerd failed to create the Gateway API on the cluster\n" | $TEE -a
-    exit 1
-fi
+linkerd_apply "Linkerd CRDs"          linkerd_crds.yaml  linkerd install --crds
+linkerd_apply "Linkerd control plane" linkerd_cp.yaml    \
+    linkerd install --set proxyInit.runAsRoot=true --set proxyInit.iptablesMode=nft
+linkerd_apply "Linkerd viz dashboard" linkerd_viz.yaml   linkerd viz install
 
+log "	Waiting 30 seconds for Linkerd pods to start..."
+sleep 30
 
-printf "\tRendering linkerd CRDs...\n" | $TEE -a
-linkerd install --crds 2>&1 1>linkerd_install_crds.yaml | $TEE -a >/dev/null
-if [ $? -ne 0 ]; then
-    printf "\tLinkerd failed to render CRDs\n" | $TEE -a
-    exit 1
-fi
-
-printf "\tInstalling linkerd CRDs...\n" | $TEE -a
-kubectl apply -f linkerd_install_crds.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to install linkerd CRDs\n" | $TEE -a
-    rm -f linkerd_install_crds.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tCleanup: failed to remove linkerd_install_crds.yaml\n" | $TEE -a
-    fi
-    exit 1
-fi
-
-rm -f linkerd_install_crds.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tCleanup: failed to remove linkerd_install_crds.yaml. Attempting to proceed...\n" | $TEE -a
-fi
-
-printf "\tRendering linkerd installation manifest...\n" | $TEE -a
-linkerd install --set proxyInit.runAsRoot=true --set proxyInit.iptablesMode=nft 2>&1 1>linkerd_install_manifest.yaml | $TEE -a >/dev/null
-if [ $? -ne 0 ]; then
-    printf "\tLinkerd failed to render installation manifest\n" | $TEE -a
-    exit 1
-fi
-
-printf "\tInstalling linkerd in cluster...\n" | $TEE -a
-kubectl apply -f linkerd_install_manifest.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to install linkerd\n" | $TEE -a
-    rm -f linkerd_install_manifest.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tCleanup: failed to remove linkerd_install_manifest.yaml\n" | $TEE -a
-		    ll
-    fi
-    exit 1
-fi
-
-rm -f linkerd_install_manifest.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tCleanup: failed to remove linkerd_install_manifest.yaml. Attempting to proceed...\n" | $TEE -a
-fi
-
-printf "\tRendering linkerd dashboard installation manifest...\n" | $TEE -a
-linkerd viz install 2>&1 1>linkerd_install_dashboard_manifest.yaml | $TEE -a >/dev/null
-if [ $? -ne 0 ]; then
-    printf "\tLinkerd failed to render dashboard installation manifest\n" | $TEE -a
-    exit 1
-fi
-printf "\tInstalling linkerd dashboard in cluster...\n" | $TEE -a
-kubectl apply -f linkerd_install_dashboard_manifest.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tLinkerd failed to install dashboard\n" | $TEE -a
-    rm -f linkerd_install_dashboard_manifest.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tCleanup: failed to remove linkerd_install_dashboard_manifest.yaml\n" | $TEE -a
-    fi
-    exit 1
-fi
-
-rm -f linkerd_install_dashboard_manifest.yaml 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tCleanup: failed to remove linkerd_install_dashboard_manifest.yaml. Attempting to proceed...\n" | $TEE -a
-fi
-sleep 30s
-printf "\tRunning linkerd installation check...\n" | $TEE -a
-linkerd check 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tLinkerd failed installation check. Please refer to the log files.\n" | $TEE -a
-    exit 1
-fi
+log "	Running Linkerd post-install check..."
+linkerd check 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Linkerd failed post-install check. Review log files."
 
 #############################################
-# Step 7: Install helm
+# Step 10: Install Helm
 #############################################
-printf "7. Installing helm...\n" | $TEE -a
+log "10. Installing Helm..."
 
-printf "\tDownloading installation script...\n" | $TEE -a
-curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to download helm installation script\n" | $TEE -a
-    exit 1
-fi
-
+curl -fsSL -o get_helm.sh \
+    https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to download Helm install script."
 chmod 700 get_helm.sh
-printf "\tInstalling helm...\n" | $TEE -a
-./get_helm.sh 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to install helm\n" | $TEE -a
-    rm -f get_helm.sh 1>>$MAIN_LOG 2>>$ERR_LOG
-    if [ $? -ne 0 ]; then
-        printf "\t\tCleanup: failed to remove get_helm.sh\n" | $TEE -a
-    fi
-    exit 1
-fi
-
-printf "\tCleaning up from helm installation...\n" | $TEE -a
-rm get_helm.sh 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tCleanup: failed to remove get_helm.sh. Attempting to proceed...\n" | $TEE -a
-fi
+./get_helm.sh 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || { rm -f get_helm.sh; die "		Failed to install Helm."; }
+rm -f get_helm.sh
 
 #############################################
-# Step 8: Start the lumenvox stack
+# Step 11: Install Capacity Private Cloud stack
 #############################################
-printf "8. Installing lumenvox stack...\n" | $TEE -a
+log "11. Installing Capacity Private Cloud stack..."
 
-# Set up helm repos
-printf "\tAdding lumenvox helm repo...\n" | $TEE -a
-helm repo add lumenvox https://lumenvox.github.io/helm-charts 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to add lumenvox to helm repos\n" | $TEE -a
-    exit 1
-fi
-printf "\tUpdating lumenvox helm repo...\n" | $TEE -a
-helm repo update 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to update helm repos\n" | $TEE -a
-    exit 1
-fi
+helm repo add lumenvox https://lumenvox.github.io/helm-charts \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to add LumenVox Helm repo."
+helm repo update 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to update Helm repos."
 
-# Set up kubernetes namespace
-printf "\tCreating lumenvox namespace...\n" | $TEE -a
-kubectl create ns lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to create lumenvox namespace\n" | $TEE -a
-    exit 1
-fi
+kubectl create ns lumenvox 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to create lumenvox namespace."
 
-# Create kubernetes secrets
-kubectl create secret generic mongodb-existing-secret --from-literal=mongodb-root-password=$MONGO_INITDB_ROOT_PASSWORD -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to create secret mongodb-existing-secret\n" | $TEE -a
-    exit 1
-fi
-kubectl create secret generic postgres-existing-secret --from-literal=postgresql-password=$POSTGRES_PASSWORD  -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to create secret postgres-existing-secret\n" | $TEE -a
-    exit 1
-fi
+create_k8s_secret() {
+    local name="$1" key="$2" val="$3"
+    kubectl create secret generic "$name" \
+        --from-literal="${key}=${val}" \
+        -n lumenvox \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "	Failed to create secret $name."
+}
 
-kubectl create secret generic rabbitmq-existing-secret --from-literal=rabbitmq-password=$RABBITMQ_PASSWORD -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to create secret postgres-existing-secret\n" | $TEE -a
-    exit 1
-fi
+create_k8s_secret mongodb-existing-secret  mongodb-root-password  "$MONGO_INITDB_ROOT_PASSWORD"
+create_k8s_secret postgres-existing-secret postgresql-password    "$POSTGRES_PASSWORD"
+create_k8s_secret rabbitmq-existing-secret rabbitmq-password      "$RABBITMQ_PASSWORD"
+create_k8s_secret redis-existing-secret    redis-password         "$REDIS_PASSWORD"
 
-kubectl create secret generic redis-existing-secret --from-literal=redis-password=$REDIS_PASSWORD -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to create secret redis-existing-secret\n" | $TEE -a
-    exit 1
-fi
+log "	Creating speech-tls-secret..."
+kubectl create secret tls speech-tls-secret \
+    --key  "$KEY_FILE" \
+    --cert "$CERT_FILE" \
+    -n lumenvox \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to create speech-tls-secret."
 
-
-cd /home/$USER/containers-quick-start
-printf "\tSetting up speech-tls-secret using key $2 and cert $3...\n" | $TEE -a
-printf "\tCommmand: kubectl create secret tls speech-tls-secret --key ./$2 --cert ./$3 -n lumenvox\n" | $TEE -a
-kubectl create secret tls speech-tls-secret --key $2 --cert $3 -n lumenvox 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\tFailed to create secret speech-tls-secret\n" | $TEE -a
-    exit 1
-fi
-
-# Install stack
-printf "\tStarting lumenvox containers...\n" | $TEE -a
-helm install lumenvox lumenvox/lumenvox -n lumenvox -f $1 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-   printf "\tFailed to start lumenvox containers\n" | $TEE -a
-   exit 1
-fi
+log "	Deploying LumenVox Helm chart..."
+helm install lumenvox lumenvox/lumenvox \
+    -n lumenvox \
+    -f "$VALUES_FILE" \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to deploy LumenVox Helm chart."
 
 #############################################
-# Step 9: Install nginx ingrss controller
+# Step 12: Install nginx ingress controller
 #############################################
+log "12. Installing nginx ingress controller..."
 
-printf "9. Installing nginx ingress controller...\n" | $TEE -a
-helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx -n ingress-nginx --create-namespace --set controller.hostNetwork=true --version 4.14.1 1>>$MAIN_LOG 2>>$ERR_LOG
-if [ $? -ne 0 ]; then
-    printf "\t\tFailed to install nginx ingress controller\n" | $TEE -a
-    exit 1
-fi
+helm upgrade --install ingress-nginx ingress-nginx \
+    --repo https://kubernetes.github.io/ingress-nginx \
+    -n ingress-nginx --create-namespace \
+    --set controller.hostNetwork=true \
+    --version "$NGINX_INGRESS_VERSION" \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to install nginx ingress controller."
 
 #############################################
-# Step 10: Gather information for join
+# Step 13: Gather worker join info
 #############################################
-KUBEADM_JOIN_TOKEN=$(kubeadm token list | tail -n 1 | cut -d' ' -f1)
-KUBEADM_JOIN_HASH="sha256:$(openssl x509 -in /etc/kubernetes/pki/ca.crt -noout -pubkey | openssl rsa -pubin -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
+KUBEADM_JOIN_TOKEN="`kubeadm token list 2>>"$ERR_LOG" | tail -n 1 | awk '{print $1}'`"
+KUBEADM_JOIN_HASH="sha256:`openssl x509 -in /etc/kubernetes/pki/ca.crt -noout -pubkey | openssl rsa -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}'`"
 
+#############################################
+# Step 14: Extract SANs for hosts file note
+#############################################
+# Pull the IP from the default route interface as the likely control-plane IP
+CONTROL_PLANE_IP="`ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7; exit}'`"
+[ -n "$CONTROL_PLANE_IP" ] || CONTROL_PLANE_IP="<CONTROL-PLANE-IP>"
+
+# Build the list of FQDNs from the same SAN builder used for the certificate
+SANS_LIST="lumenvox-api${HOSTNAME_SUFFIX}
+biometric-api${HOSTNAME_SUFFIX}
+management-api${HOSTNAME_SUFFIX}
+reporting-api${HOSTNAME_SUFFIX}
+admin-portal${HOSTNAME_SUFFIX}
+deployment-portal${HOSTNAME_SUFFIX}
+file-store${HOSTNAME_SUFFIX}
+grafana${HOSTNAME_SUFFIX}"
+
+#############################################
 # Done
-printf "\nThe installation script has completed! The pods should now be starting.\n"
-printf "\nLinkerd has been installed, but it has not been added to the path. To add the binary to your path, add the following to your .bashrc:\n"
-printf "\n\tif ! [[ \"\$PATH\" =~ \"\$HOME/.linkerd2/bin\" ]]; then PATH=\"\$HOME/.linkerd2/bin:\$PATH\"; fi\n"
-printf "\nTo add a worker node to the cluster, run the worker install script with the following arguments:\n"
-printf "\t./lumenvox-worker-install.sh <control plane IP> $KUBEADM_JOIN_TOKEN $KUBEADM_JOIN_HASH\n"
+#############################################
 printf "\n"
+printf "==========================================================\n"
+printf "   Capacity Private Cloud installation complete!\n"
+printf "==========================================================\n"
+printf "\n"
+printf "Pods are now starting up. Monitor progress with:\n"
+printf "  watch kubectl get po -A\n"
+printf "\n"
+printf "Linkerd is installed but not permanently on PATH.\n"
+printf "Add this to ~/.bashrc to persist it:\n"
+printf "  export PATH=\$PATH:\$HOME/.linkerd2/bin\n"
+printf "\n"
+printf "To join a worker node to this cluster, run on the worker:\n"
+printf "  ./lumenvox-worker-install.sh <control-plane-IP> %s %s\n" "$KUBEADM_JOIN_TOKEN" "$KUBEADM_JOIN_HASH"
+printf "\n"
+printf "NOTE: '%s' was added to the 'docker' group.\n" "$REAL_USER"
+printf "      Log out and back in (or run 'newgrp docker') for this to take effect.\n"
+printf "\n"
+printf "==========================================================\n"
+printf "   IMPORTANT: DNS / Hosts File Configuration Required\n"
+printf "==========================================================\n"
+printf "\n"
+printf "No DNS records exist for the certificate SANs. Each client machine\n"
+printf "that needs to reach the LumenVox endpoints must add the following\n"
+printf "entries to its hosts file:\n"
+printf "\n"
+printf "  Control-plane IP detected: %s\n" "$CONTROL_PLANE_IP"
+printf "  (Replace with the correct IP if this machine sits behind a load\n"
+printf "   balancer or has multiple interfaces.)\n"
+printf "\n"
+
+# Print the ready-to-paste hosts entries
+while IFS= read -r fqdn; do
+    printf "  %s %s\n" "$CONTROL_PLANE_IP" "$fqdn"
+done <<< "$SANS_LIST"
+
+printf "\n"
+printf "  --- Linux clients ---\n"
+printf "  Edit (as root/sudo):  /etc/hosts\n"
+printf "\n"
+printf "  --- Windows clients ---\n"
+printf "  Edit (as Administrator):\n"
+printf "%s\n" 'C:\Windows\System32\drivers\etc\hosts'
+printf "\n"
+printf "  Tip: On Windows, open Notepad as Administrator, then\n"
+printf "  File > Open the path above to edit and save.\n"
+printf "\n"
+printf "==========================================================\n"
+printf "\n"
+printf "Logs: %s\n      %s\n" "$MAIN_LOG" "$ERR_LOG"

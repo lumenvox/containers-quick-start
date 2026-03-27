@@ -11,6 +11,8 @@ global:
       className: nginx
     loggingVerbosity: "warn"
     redisTtl: 4h
+  image:
+    tag: ":7.0"
   rabbitmq:
     enableTLS: false
     connection:
@@ -31,8 +33,7 @@ global:
     lumenvoxSpeech: true
     lumenvoxVb: false
     lumenvoxCommon: true
-  itnLanguages:
-    - name: "en"
+  enableItn: false
   asrLanguages:
     - name: "en"
   ttsLanguages:
@@ -40,9 +41,9 @@ global:
       legacyEnabled: false
       voices:
         - name: "jeff"
-          version: "4.0.0"
+          version: "4.0"
         - name: "megan"
-          version: "4.0.0"
+          version: "4.0"
   vbLanguages:
     - name: "en_US"
       version: "2.1.15"

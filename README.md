@@ -15,11 +15,11 @@ of setting up a full Kubernetes cluster with the relevant software.
 ## Supported Environments
 
 The scripts support the following environments:
-* Centos 7
-* Centos 8
-* Ubuntu 22.04 (Focal and Jammy)
-* RHEL 7
-* RHEL 8
+* Ubuntu 22.04 and 24.04 LTS
+* Centos 7, 8, 9
+* Almalinux 9
+* Rocky 7, 8, 9
+* RHEL 7, 8, 9
 
 Additionally, the following conditions must be met:
 * swap must be disabled.
