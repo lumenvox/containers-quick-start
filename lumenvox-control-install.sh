@@ -175,9 +175,9 @@ fi
 #############################################
 K8S_VERSION="1.33"
 CRICTL_VERSION="v1.33.0"
-CALICO_VERSION="v3.29.1"
+CALICO_VERSION="v3.29.7"
 GATEWAY_API_VERSION="v1.2.1"
-NGINX_INGRESS_VERSION="4.14.1"
+NGINX_INGRESS_VERSION="4.14.5"
 LINKERD_INSTALL_URL="https://assets.lumenvox.com/third-party/linkerd/linkerd_install"
 
 #############################################
