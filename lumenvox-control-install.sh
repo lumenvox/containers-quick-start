@@ -603,7 +603,14 @@ fi
 #############################################
 if ! command -v crictl &>/dev/null; then
     log "	crictl not found -- installing..."
-    CRICTL_TAR="crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz"
+    # Map uname -m kernel arch names to the Go-style names used in crictl release filenames
+    case "$ARCH" in
+        x86_64)  CRICTL_ARCH="amd64" ;;
+        aarch64) CRICTL_ARCH="arm64" ;;
+        armv7l)  CRICTL_ARCH="arm"   ;;
+        *)       CRICTL_ARCH="$ARCH" ;;
+    esac
+    CRICTL_TAR="crictl-${CRICTL_VERSION}-linux-${CRICTL_ARCH}.tar.gz"
     curl -fsSLO \
         "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/${CRICTL_TAR}" \
         1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
