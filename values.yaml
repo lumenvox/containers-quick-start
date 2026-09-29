@@ -2,7 +2,7 @@
 
 global:
   licensing:
-  # Note: licensing (and therefore system) will not work without a valid clusterGuid value
+    # Note: licensing (and therefore system) will not work without a valid clusterGuid value
     clusterGuid: "<lumenvox-to-provide-cluster-guid>"
   defaultNamespace: "lumenvox"
   hostnameSuffix: ".testmachine.com"
@@ -15,8 +15,13 @@ global:
     tag: ":8.0"
   rabbitmq:
     enableTLS: false
+    auth:
+      existingPasswordSecret: "rabbitmq-existing-secret"
     connection:
       url: "<ip-address-of-server-running-rabbitmq>"
+      port: 5672
+      user: "lvuser"
+      vhost: "capacity-private-cloud"
   redis:
     enableTLS: false
     connection:
@@ -40,10 +45,8 @@ global:
     - name: "en_us"
       legacyEnabled: false
       voices:
-        - name: "jeff"
-          version: "4.0"
-        - name: "megan"
-          version: "4.0"
+        - name: "caspian"
+        - name: "aurora"
   vbLanguages:
     - name: "en_US"
       version: "2.1.15"
