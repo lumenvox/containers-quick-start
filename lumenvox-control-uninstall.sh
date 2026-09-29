@@ -22,12 +22,12 @@ printf "WARNING: This script will completely remove the Capacity Private Cloud s
 printf "         Linkerd, Helm, Docker, containerd, all associated data,\n"
 printf "         and all Capacity Private Cloud model files under /data.\n"
 printf "         This action is IRREVERSIBLE.\n\n"
-printf "Type 'yes' to confirm: "
+printf "Proceed? [y/N]: "
 read -r CONFIRM
-if [ "$CONFIRM" != "yes" ]; then
-    printf "Aborted.\n"
-    exit 0
-fi
+case "$CONFIRM" in
+    [yY][eE][sS]|[yY]) ;;
+    *) printf "Aborted.\n"; exit 0 ;;
+esac
 
 #############################################
 # Log setup
@@ -35,8 +35,8 @@ fi
 currentdir="$(pwd)"
 MAIN_LOG="$currentdir/uninstall-main-log.txt"
 ERR_LOG="$currentdir/uninstall-err-log.txt"
-> "$MAIN_LOG"
-> "$ERR_LOG"
+true > "$MAIN_LOG"
+true > "$ERR_LOG"
 
 log()  { printf "%s\n" "$*" | tee -a "$MAIN_LOG"; }
 warn() { printf "WARNING: %s\n" "$*" | tee -a "$MAIN_LOG" "$ERR_LOG" >&2; }
@@ -52,10 +52,20 @@ run() {
 #############################################
 # OS detection
 #############################################
-DISTRO="$(grep ^ID= /etc/*-release -h 2>/dev/null | cut -d'=' -f2 | tr -d '"' | head -1)"
+if [ -r /etc/os-release ]; then
+    RELEASE_FILES="/etc/os-release"
+else
+    RELEASE_FILES="/etc/*-release"
+fi
+DISTRO="$(grep ^ID= $RELEASE_FILES -h 2>/dev/null | cut -d'=' -f2 | tr -d '"' | head -1)"
 
 case "$DISTRO" in
-  ubuntu | centos | rhel | rocky | almalinux) ;;
+  ubuntu | debian | centos | rhel | rocky) ;;
+  almalinux)
+    ALMA_VER="$(grep ^VERSION_ID= $RELEASE_FILES -h 2>/dev/null | cut -d'=' -f2 | tr -d '"' | cut -d'.' -f1 | head -1)"
+    [ "${ALMA_VER:-0}" -ge 9 ] || { printf "Error: AlmaLinux version '%s' is not supported. AlmaLinux 9 is required.\n" "$ALMA_VER"; exit 1; }
+    [ "${ALMA_VER:-0}" -ge 10 ] && { printf "Error: AlmaLinux version '%s' is not supported. Only AlmaLinux 9 is supported.\n" "$ALMA_VER"; exit 1; }
+    ;;
   *)
     printf "Error: distribution '$DISTRO' is not supported.\n"
     exit 1
@@ -165,7 +175,7 @@ done < <(ip link show 2>/dev/null | awk -F': ' '/^[0-9]+: (cali|tunl|vxlan|flann
 log "4. Uninstalling Kubernetes packages..."
 
 case "$DISTRO" in
-  ubuntu)
+  ubuntu | debian)
     run sudo apt-mark unhold kubelet kubeadm kubectl
     run sudo apt-get remove -y kubelet kubeadm kubectl
     run sudo apt-get purge  -y kubelet kubeadm kubectl
@@ -187,6 +197,8 @@ run sudo rm -f /usr/local/bin/crictl
 # Step 5: Uninstall Helm
 #############################################
 log "5. Uninstalling Helm..."
+
+export PATH="/usr/local/bin:$PATH"
 
 if command -v helm &>/dev/null; then
     HELM_BIN="$(command -v helm)"
@@ -213,8 +225,9 @@ else
 fi
 
 #############################################
-# Step 7: Remove Docker
+# Step 7: Remove Docker or Podman
 #############################################
+
 log "7. Removing Docker..."
 
 # Stop docker.socket first to prevent it from auto-restarting docker.service
@@ -223,7 +236,7 @@ sudo systemctl stop   docker        1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
 sudo systemctl disable docker       1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
 
 case "$DISTRO" in
-  ubuntu)
+  ubuntu | debian)
     run sudo apt-get remove -y docker-ce docker-ce-cli docker-compose-plugin \
         docker-buildx-plugin docker-ce-rootless-extras
     run sudo apt-get purge  -y docker-ce docker-ce-cli docker-compose-plugin \
@@ -256,7 +269,7 @@ sudo systemctl stop    containerd 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
 sudo systemctl disable containerd 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
 
 case "$DISTRO" in
-  ubuntu)
+  ubuntu | debian)
     run sudo apt-get remove -y containerd.io
     run sudo apt-get purge  -y containerd.io
     run sudo apt-get autoremove -y
@@ -292,7 +305,7 @@ done
 log "10. Re-enabling firewall and security frameworks..."
 
 case "$DISTRO" in
-  ubuntu)
+  ubuntu | debian)
     run sudo systemctl enable ufw
     run sudo systemctl start  ufw
     # AppArmor: only re-enable if the unit file exists on this system

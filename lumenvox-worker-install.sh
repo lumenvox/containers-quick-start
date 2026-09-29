@@ -26,8 +26,8 @@ fi
 #############################################
 # Version configuration
 #############################################
-K8S_VERSION="1.33"
-CRICTL_VERSION="v1.33.0"
+K8S_VERSION="1.35"
+CRICTL_VERSION="v1.35.0"
 
 #############################################
 # Log setup
@@ -35,8 +35,8 @@ CRICTL_VERSION="v1.33.0"
 currentdir="`pwd`"
 MAIN_LOG="$currentdir/main-log.txt"
 ERR_LOG="$currentdir/err-log.txt"
-> "$MAIN_LOG"
-> "$ERR_LOG"
+true > "$MAIN_LOG"
+true > "$ERR_LOG"
 
 log() { printf "%s\n" "$*" | tee -a "$MAIN_LOG"; }
 err() { printf "%s\n" "$*" | tee -a "$MAIN_LOG" "$ERR_LOG" >&2; }
@@ -50,16 +50,29 @@ log "0. Detecting OS..."
 OS="`uname | tr '[:upper:]' '[:lower:]'`"
 [ "$OS" = "linux" ] || die "Invalid OS '$OS': must be linux."
 
-DISTRO="`grep ^ID= /etc/*-release -h 2>/dev/null | cut -d'=' -f2 | tr -d '\"' | head -1`"
+if [ -r /etc/os-release ]; then
+    RELEASE_FILES="/etc/os-release"
+else
+    RELEASE_FILES="/etc/*-release"
+fi
+
+DISTRO="`grep ^ID= $RELEASE_FILES -h 2>/dev/null | cut -d'=' -f2 | tr -d '\"' | head -1`"
 ARCH="`uname -m`"
 
 case "$DISTRO" in
   ubuntu) ;;
+  debian)
+    DEBIAN_VER="`grep ^VERSION_ID= $RELEASE_FILES -h 2>/dev/null \
+        | cut -d'=' -f2 | tr -d '\"' | cut -d'.' -f1 | head -1`"
+    { [ -n "$DEBIAN_VER" ] && [ "$DEBIAN_VER" -ge 11 ]; } \
+        || die "Error: Debian version '$DEBIAN_VER' is not supported. Debian 11 or newer is required."
+    ;;
   centos | rhel | rocky) ;;
   almalinux)
-    ALMA_VER="`grep ^VERSION_ID= /etc/*-release -h 2>/dev/null \
+    ALMA_VER="`grep ^VERSION_ID= $RELEASE_FILES -h 2>/dev/null \
         | cut -d'=' -f2 | tr -d '\"' | cut -d'.' -f1 | head -1`"
-    [ "$ALMA_VER" = "9" ] || die "Error: AlmaLinux version '$ALMA_VER' is not supported. Only AlmaLinux 9 is supported."
+    [ "$ALMA_VER" -ge 9 ] || die "Error: AlmaLinux version '$ALMA_VER' is not supported. AlmaLinux 9 is required."
+    [ "$ALMA_VER" -ge 10 ] && die "Error: AlmaLinux version '$ALMA_VER' is not supported. Only AlmaLinux 9 is supported."
     ;;
   *)
     die "Error: distribution '$DISTRO' is not supported."
@@ -74,6 +87,26 @@ log "	Detected: distro=$DISTRO arch=$ARCH"
 MIN_CPU_CORES=8
 MIN_RAM_GB=15
 MIN_DISK_GB=150
+
+#############################################
+# Bootstrap: ensure curl is available
+#############################################
+if ! command -v curl &>/dev/null; then
+    log "	curl not found -- installing..."
+    case "$DISTRO" in
+      ubuntu | debian)
+        sudo apt-get update -y 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "	ERROR: Failed to update apt while bootstrapping curl."
+        sudo apt-get install -y curl 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "	ERROR: Failed to install curl."
+        ;;
+      centos | rhel | rocky | almalinux)
+        sudo yum install -y curl 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "	ERROR: Failed to install curl."
+        ;;
+    esac
+    log "		curl installed."
+fi
 
 #############################################
 # Pre-flight checks
@@ -108,7 +141,7 @@ log "		Kubernetes repository connectivity OK."
 #############################################
 # Kernel pre-requisites
 #############################################
-log "0a. Configuring kernel modules and sysctl..."
+log "0b. Configuring kernel modules and sysctl..."
 
 sudo tee /etc/modules-load.d/k8s.conf >/dev/null <<'KMOD'
 ip_tables
@@ -135,7 +168,7 @@ sudo sysctl --system 1>>"$MAIN_LOG" 2>>"$ERR_LOG"
 log "1. Disabling firewall and MAC frameworks..."
 
 case "$DISTRO" in
-  ubuntu)
+  ubuntu | debian)
     for svc in ufw apparmor; do
         sudo systemctl stop    "$svc" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
         sudo systemctl disable "$svc" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
@@ -154,7 +187,7 @@ esac
 #############################################
 # Swap
 #############################################
-SWAP_DEVICES="`swapon --show | wc -l`"
+SWAP_DEVICES="`sudo swapon --show | wc -l`"
 if [ "$SWAP_DEVICES" -gt 0 ]; then
     log "	Swap detected -- disabling (required for Kubernetes)..."
     sudo swapoff -a 1>>"$MAIN_LOG" 2>>"$ERR_LOG"
@@ -169,7 +202,7 @@ fi
 #############################################
 pkg_remove() {
     case "$DISTRO" in
-      ubuntu)
+      ubuntu | debian)
         sudo apt-get remove -y "$@" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
         ;;
       centos | rhel | rocky | almalinux)
@@ -180,7 +213,7 @@ pkg_remove() {
 
 pkg_install() {
     case "$DISTRO" in
-      ubuntu)
+      ubuntu | debian)
         sudo apt-get install -y "$@" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
             || die "		Failed to install: $*"
         ;;
@@ -199,7 +232,7 @@ log "2. Checking for existing Docker installation..."
 if command -v docker 1>>"$MAIN_LOG" 2>>"$ERR_LOG"; then
     log "	Removing existing Docker packages..."
     case "$DISTRO" in
-      ubuntu)
+      ubuntu | debian)
         pkg_remove docker docker-engine docker.io runc
         sudo apt-get purge -y \
             docker-ce docker-ce-cli docker-buildx-plugin \
@@ -254,14 +287,14 @@ if command -v containerd 1>>"$MAIN_LOG" 2>>"$ERR_LOG"; then
     fi
 else
     case "$DISTRO" in
-      ubuntu)
+      ubuntu | debian)
         sudo apt-get update -y 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
             || die "		Failed to update apt."
-        pkg_install ca-certificates curl gnupg
+        pkg_install ca-certificates curl gnupg lsb-release
         sudo mkdir -p /etc/apt/keyrings
 
         log "	Fetching Docker GPG key..."
-        curl -fsSLo docker.gpg https://download.docker.com/linux/ubuntu/gpg \
+        curl -fsSLo docker.gpg "https://download.docker.com/linux/${DISTRO}/gpg" \
             1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
             || die "		Failed to download Docker GPG key."
         sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg docker.gpg \
@@ -270,8 +303,8 @@ else
             || { rm -f docker.gpg; die "		Failed to install Docker GPG key."; }
 
         DPKG_ARCH="`dpkg --print-architecture`"
-        UBUNTU_CODENAME="`lsb_release -cs`"
-        echo "deb [arch=${DPKG_ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${UBUNTU_CODENAME} stable" \
+        DEB_CODENAME="`lsb_release -cs`"
+        echo "deb [arch=${DPKG_ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${DISTRO} ${DEB_CODENAME} stable" \
             | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null \
             || die "		Failed to add Docker repository."
 
@@ -284,7 +317,7 @@ else
         sudo yum install -y yum-utils curl 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
             || die "		Failed to install yum-utils and curl."
         sudo yum-config-manager --add-repo \
-            https://download.docker.com/linux/centos/docker-ce.repo \
+            "https://download.docker.com/linux/centos/docker-ce.repo" \
             1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
             || die "		Failed to add Docker yum repo."
         pkg_install containerd.io
@@ -333,7 +366,7 @@ KUBErepo
     sudo yum versionlock kubeadm kubelet kubectl       1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
     ;;
 
-  ubuntu)
+  ubuntu | debian)
     pkg_install apt-transport-https ca-certificates curl
     sudo mkdir -p /etc/apt/keyrings
 
@@ -370,7 +403,14 @@ fi
 #############################################
 if ! command -v crictl &>/dev/null; then
     log "5. crictl not found -- installing..."
-    CRICTL_TAR="crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz"
+    # Map uname -m kernel arch names to the Go-style names used in crictl release filenames
+    case "$ARCH" in
+        x86_64)  CRICTL_ARCH="amd64" ;;
+        aarch64) CRICTL_ARCH="arm64" ;;
+        armv7l)  CRICTL_ARCH="arm"   ;;
+        *)       CRICTL_ARCH="$ARCH" ;;
+    esac
+    CRICTL_TAR="crictl-${CRICTL_VERSION}-linux-${CRICTL_ARCH}.tar.gz"
     curl -fsSLO \
         "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/${CRICTL_TAR}" \
         1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
@@ -386,6 +426,7 @@ fi
 #############################################
 # Step 6: Join the control plane
 #############################################
+REAL_USER="$USER"
 log "6. Joining control plane at ${CONTROL_PLANE_IP}..."
 
 sudo kubeadm join "${CONTROL_PLANE_IP}:6443" \
@@ -393,6 +434,30 @@ sudo kubeadm join "${CONTROL_PLANE_IP}:6443" \
     --discovery-token-ca-cert-hash "${JOIN_HASH}" \
     1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
     || die "	Failed to join control plane at ${CONTROL_PLANE_IP}."
+
+#############################################
+# Step 7: Pre-create /data directories with correct ownership
+#############################################
+log "7. Pre-creating /data directories..."
+
+# Pre-create all expected /data subdirectories owned by the install user so
+# that kubelet's hostPath mounts find existing lvcust-owned directories
+# instead of creating them as root when pods are first scheduled on this node.
+DATA_SUBDIRS="asr_cached_client_grammars asr_grammar_cache europa_cache file_store grammar_logs lang lumenvox_backends tts_cache"
+LANG_SUBDIRS="AsrModels BackendModels Dict DistPackageModels downloads EuropaAsrModels installed_manifests manifests NeuralTtsModels NluModels tts vb-active"
+for sub in $DATA_SUBDIRS; do
+    sudo mkdir -p "/data/$sub" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "	Failed to create /data/$sub."
+    sudo chown -R "$REAL_USER:$REAL_USER" "/data/$sub" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "	Failed to set ownership on /data/$sub."
+done
+for sub in $LANG_SUBDIRS; do
+    sudo mkdir -p "/data/lang/$sub" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "	Failed to create /data/lang/$sub."
+    sudo chown -R "$REAL_USER:$REAL_USER" "/data/lang/$sub" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "	Failed to set ownership on /data/lang/$sub."
+done
+log "	/data subdirectories created and owned by $REAL_USER."
 
 #############################################
 # Done

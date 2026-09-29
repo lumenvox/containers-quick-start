@@ -1,5 +1,7 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
+# Note: set -e is intentionally omitted — uninstall steps should be best-effort
+# and continue even if individual steps fail.
 
 #############################################
 # Usage
@@ -27,8 +29,8 @@ fi
 currentdir="`pwd`"
 MAIN_LOG="$currentdir/uninstall-main-log.txt"
 ERR_LOG="$currentdir/uninstall-err-log.txt"
-> "$MAIN_LOG"
-> "$ERR_LOG"
+true > "$MAIN_LOG"
+true > "$ERR_LOG"
 
 log() { printf "%s\n" "$*" | tee -a "$MAIN_LOG"; }
 err() { printf "%s\n" "$*" | tee -a "$MAIN_LOG" "$ERR_LOG" >&2; }
@@ -42,10 +44,16 @@ log "0. Detecting OS..."
 OS="`uname | tr '[:upper:]' '[:lower:]'`"
 [ "$OS" = "linux" ] || die "Invalid OS '$OS': must be linux."
 
-DISTRO="`grep ^ID= /etc/*-release -h 2>/dev/null | cut -d'=' -f2 | tr -d '\"' | head -1`"
+if [ -r /etc/os-release ]; then
+    RELEASE_FILES="/etc/os-release"
+else
+    RELEASE_FILES="/etc/*-release"
+fi
+
+DISTRO="`grep ^ID= $RELEASE_FILES -h 2>/dev/null | cut -d'=' -f2 | tr -d '\"' | head -1`"
 
 case "$DISTRO" in
-  ubuntu) ;;
+  ubuntu | debian) ;;
   centos | rhel | rocky) ;;
   almalinux) ;;
   *) die "Error: distribution '$DISTRO' is not supported." ;;
@@ -58,7 +66,7 @@ log "	Detected: distro=$DISTRO"
 #############################################
 pkg_remove() {
     case "$DISTRO" in
-      ubuntu)
+      ubuntu | debian)
         sudo apt-get remove -y "$@" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
         ;;
       centos | rhel | rocky | almalinux)
@@ -84,12 +92,12 @@ else
     printf "already configured on this node.\n"
 fi
 printf "\n"
-printf "Proceed? [yes/N]: "
+printf "Proceed? [y/N]: "
 read -r CONFIRM </dev/tty
-if [ "$CONFIRM" != "yes" ]; then
-    printf "Aborted.\n"
-    exit 1
-fi
+case "$CONFIRM" in
+    [yY][eE][sS]|[yY]) ;;
+    *) printf "Aborted.\n"; exit 1 ;;
+esac
 
 #############################################
 # Step 1: Drain and delete node from cluster
@@ -97,7 +105,6 @@ fi
 log "1. Draining and deleting node from cluster..."
 
 NODE_NAME="`hostname`"
-KUBECONFIG_TMP=""
 
 if [ -n "$CONTROL_PLANE_USER" ] && [ -n "$CONTROL_PLANE_IP" ]; then
     # Run drain and delete directly on the control plane via SSH
@@ -147,12 +154,12 @@ else
     log "	  kubectl delete node $NODE_NAME"
     printf "\n"
     printf "kubectl is not available on this node and no control plane credentials\n"
-    printf "were provided. Continue without draining? [yes/N]: "
+    printf "were provided. Continue without draining? [y/N]: "
     read -r CONFIRM2 </dev/tty
-    if [ "$CONFIRM2" != "yes" ]; then
-        printf "Aborted.\n"
-        exit 1
-    fi
+    case "$CONFIRM2" in
+        [yY][eE][sS]|[yY]) ;;
+        *) printf "Aborted.\n"; exit 1 ;;
+    esac
 fi
 
 #############################################
@@ -169,12 +176,12 @@ else
 fi
 
 #############################################
-# Step 2: Remove Kubernetes components
+# Step 3: Remove Kubernetes components
 #############################################
 log "3. Removing Kubernetes components..."
 
 case "$DISTRO" in
-  ubuntu)
+  ubuntu | debian)
     sudo apt-mark unhold kubelet kubeadm kubectl 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
     pkg_remove kubelet kubeadm kubectl
     sudo apt-get autoremove -y 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
@@ -191,7 +198,7 @@ esac
 log "	Kubernetes components removed."
 
 #############################################
-# Step 3: Remove Kubernetes state and config
+# Step 4: Remove Kubernetes state and config
 #############################################
 log "4. Removing Kubernetes state and config..."
 
@@ -240,9 +247,9 @@ done
 log "	Kubernetes state cleaned up."
 
 #############################################
-# Step 4: Remove containerd
+# Step 5: Remove containerd
 #############################################
-log "4. Removing containerd..."
+log "5. Removing containerd..."
 
 if command -v containerd &>/dev/null; then
     sudo systemctl stop    containerd 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
@@ -251,7 +258,7 @@ if command -v containerd &>/dev/null; then
     sudo rm -rf /etc/containerd /var/lib/containerd 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
 
     case "$DISTRO" in
-      ubuntu)
+      ubuntu | debian)
         sudo rm -f /etc/apt/sources.list.d/docker.list
         sudo rm -f /etc/apt/keyrings/docker.gpg
         sudo apt-get autoremove -y 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
@@ -266,9 +273,9 @@ else
 fi
 
 #############################################
-# Step 5: Remove crictl
+# Step 6: Remove crictl
 #############################################
-log "5. Removing crictl..."
+log "6. Removing crictl..."
 
 if command -v crictl &>/dev/null; then
     sudo rm -f /usr/local/bin/crictl 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
@@ -279,14 +286,37 @@ else
 fi
 
 #############################################
-# Step 6: Remove kernel config files
+# Step 7: Remove kernel config files
 #############################################
-log "6. Removing kernel module and sysctl config files..."
+log "7. Removing kernel module and sysctl config files..."
 
 sudo rm -f /etc/modules-load.d/k8s.conf 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
 sudo rm -f /etc/sysctl.d/k8s.conf       1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
 sudo sysctl --system 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
 log "	Kernel config files removed and sysctl reloaded."
+
+#############################################
+# Step 8: Re-enable firewall and security frameworks
+#############################################
+log "8. Re-enabling firewall and security frameworks..."
+
+case "$DISTRO" in
+  ubuntu | debian)
+    sudo systemctl enable ufw 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    sudo systemctl start  ufw 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    # AppArmor: only re-enable if the unit file exists on this system
+    if systemctl list-unit-files apparmor.service &>/dev/null; then
+        sudo systemctl enable apparmor 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+        sudo systemctl start  apparmor 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    fi
+    ;;
+  centos | rhel | rocky | almalinux)
+    sudo systemctl enable firewalld 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    sudo systemctl start  firewalld 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    log "	NOTE: SELinux was set to permissive by the installer. To re-enable enforcing mode,"
+    log "	      edit /etc/selinux/config and set SELINUX=enforcing, then reboot."
+    ;;
+esac
 
 #############################################
 # Done

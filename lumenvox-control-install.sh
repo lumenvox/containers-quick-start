@@ -2,12 +2,47 @@
 set -euo pipefail
 
 #############################################
+# Parse optional flags (--mesh-stack), leaving positional args intact
+#############################################
+MESH_STACK=""   # empty = not yet chosen; interactive prompt below decides the default (istio)
+
+POSITIONAL_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --mesh-stack)
+            if [ $# -lt 2 ]; then
+                printf "Error: --mesh-stack requires a value (linkerd|istio)\n"
+                exit 1
+            fi
+            MESH_STACK="$2"
+            shift 2
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${POSITIONAL_ARGS[@]}"
+
+case "$MESH_STACK" in
+    ""|linkerd|istio) ;;
+    *)
+        printf "Error: --mesh-stack must be 'linkerd' or 'istio' (got '%s')\n" "$MESH_STACK"
+        exit 1
+        ;;
+esac
+
+#############################################
 # Usage
 #############################################
 if [ $# -ne 1 ] && [ $# -ne 3 ]; then
     printf "Usage:\n"
-    printf "  ./lumenvox-control-install.sh values.yaml\n"
-    printf "  ./lumenvox-control-install.sh values.yaml server.key server.crt\n"
+    printf "  ./lumenvox-control-install.sh [--mesh-stack linkerd|istio] values.yaml\n"
+    printf "  ./lumenvox-control-install.sh [--mesh-stack linkerd|istio] values.yaml server.key server.crt\n"
+    printf "\n"
+    printf "  --mesh-stack istio    (default) Istio service mesh + Istio ingress gateway\n"
+    printf "  --mesh-stack linkerd  Linkerd service mesh + nginx-ingress\n"
     exit 1
 fi
 
@@ -173,10 +208,11 @@ fi
 #############################################
 # Version configuration
 #############################################
-K8S_VERSION="1.33"
-CRICTL_VERSION="v1.33.0"
-CALICO_VERSION="v3.29.7"
+K8S_VERSION="1.35"
+CRICTL_VERSION="v1.35.0"
+CALICO_VERSION="v3.30.7"
 GATEWAY_API_VERSION="v1.2.1"
+ISTIO_VERSION="1.30.1"
 NGINX_INGRESS_VERSION="4.14.5"
 LINKERD_INSTALL_URL="https://assets.lumenvox.com/third-party/linkerd/linkerd_install"
 
@@ -192,12 +228,31 @@ MIN_DISK_GB=150
 #############################################
 MAIN_LOG="$currentdir/main-log.txt"
 ERR_LOG="$currentdir/err-log.txt"
-> "$MAIN_LOG"
-> "$ERR_LOG"
+true > "$MAIN_LOG"
+true > "$ERR_LOG"
 
 log() { printf "%s\n" "$*" | tee -a "$MAIN_LOG"; }
 err() { printf "%s\n" "$*" | tee -a "$MAIN_LOG" "$ERR_LOG" >&2; }
 die() { err "$*"; exit 1; }
+
+#############################################
+# Mesh stack: interactive prompt if not provided via --mesh-stack
+#############################################
+if [ -z "$MESH_STACK" ]; then
+    printf "\nNo --mesh-stack provided -- choose a service mesh + ingress stack.\n"
+    printf "\t1) Istio  - Istio service mesh + Istio ingress gateway (recommended)\n"
+    printf "\t2) Linkerd - Linkerd service mesh + nginx ingress controller\n"
+    while true; do
+        printf "\tChoice [1-2]: "
+        read -r MESH_STACK_CHOICE
+        case "$MESH_STACK_CHOICE" in
+            1) MESH_STACK="istio"; break ;;
+            2) MESH_STACK="linkerd"; break ;;
+            *) printf "\t\tPlease enter 1 or 2.\n" ;;
+        esac
+    done
+    printf "\t\tSelected: %s\n" "$MESH_STACK"
+fi
 
 #############################################
 # Step 0: OS detection & validation
@@ -207,16 +262,29 @@ log "0. Detecting OS..."
 OS="`uname | tr '[:upper:]' '[:lower:]'`"
 [ "$OS" = "linux" ] || die "Invalid OS '$OS': must be linux."
 
-DISTRO="`grep ^ID= /etc/*-release -h 2>/dev/null | cut -d'=' -f2 | tr -d '\"' | head -1`"
+if [ -r /etc/os-release ]; then
+    RELEASE_FILES="/etc/os-release"
+else
+    RELEASE_FILES="/etc/*-release"
+fi
+
+DISTRO="`grep ^ID= $RELEASE_FILES -h 2>/dev/null | cut -d'=' -f2 | tr -d '\"' | head -1`"
 ARCH="`uname -m`"
 
 case "$DISTRO" in
   ubuntu) ;;
+  debian)
+    DEBIAN_VER="`grep ^VERSION_ID= $RELEASE_FILES -h 2>/dev/null \
+        | cut -d'=' -f2 | tr -d '\"' | cut -d'.' -f1 | head -1`"
+    { [ -n "$DEBIAN_VER" ] && [ "$DEBIAN_VER" -ge 11 ]; } \
+        || die "Error: Debian version '$DEBIAN_VER' is not supported. Debian 11 or newer is required."
+    ;;
   centos | rhel | rocky) ;;
   almalinux)
-    ALMA_VER="`grep ^VERSION_ID= /etc/*-release -h 2>/dev/null \
+    ALMA_VER="`grep ^VERSION_ID= $RELEASE_FILES -h 2>/dev/null \
         | cut -d'=' -f2 | tr -d '\"' | cut -d'.' -f1 | head -1`"
-    [ "$ALMA_VER" = "9" ] || die "Error: AlmaLinux version '$ALMA_VER' is not supported. Only AlmaLinux 9 is supported."
+    [ "$ALMA_VER" -ge 9 ] || die "Error: AlmaLinux version '$ALMA_VER' is not supported. AlmaLinux 9 is required."
+    [ "$ALMA_VER" -ge 10 ] && die "Error: AlmaLinux version '$ALMA_VER' is not supported. Only AlmaLinux 9 is supported."
     ;;
   *)
     die "Error: distribution '$DISTRO' is not supported."
@@ -224,6 +292,26 @@ case "$DISTRO" in
 esac
 
 log "	Detected: distro=$DISTRO arch=$ARCH"
+
+#############################################
+# Bootstrap: ensure curl is available
+#############################################
+if ! command -v curl &>/dev/null; then
+    log "	curl not found -- installing..."
+    case "$DISTRO" in
+      ubuntu | debian)
+        sudo apt-get update -y 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "	ERROR: Failed to update apt while bootstrapping curl."
+        sudo apt-get install -y curl 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "	ERROR: Failed to install curl."
+        ;;
+      centos | rhel | rocky | almalinux)
+        sudo yum install -y curl 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || die "	ERROR: Failed to install curl."
+        ;;
+    esac
+    log "		curl installed."
+fi
 
 #############################################
 # Pre-flight checks
@@ -235,6 +323,11 @@ log "	Checking CPU cores (minimum ${MIN_CPU_CORES} required)..."
 [ "$CPU_CORES" -ge "$MIN_CPU_CORES" ] || \
     die "	ERROR: Insufficient CPU cores. Required: ${MIN_CPU_CORES}, Available: ${CPU_CORES}."
 log "		CPU OK: ${CPU_CORES} cores available."
+
+log "	Checking CPU AVX2 support..."
+grep -q avx2 /proc/cpuinfo || \
+    die "	ERROR: CPU does not support AVX2. AVX2 is required for LumenVox processing workloads."
+log "		AVX2 OK: CPU supports AVX2."
 
 RAM_KB="`awk '/^MemTotal:/{print $2}' /proc/meminfo`"
 RAM_GB=$(( RAM_KB / 1024 / 1024 ))
@@ -255,6 +348,56 @@ curl -fsSL --max-time 10 --silent --output /dev/null "https://pkgs.k8s.io" || \
     die "	ERROR: Cannot reach https://pkgs.k8s.io. Verify network connectivity and DNS before retrying."
 log "		Kubernetes repository connectivity OK."
 
+# Kubernetes 1.35+ requires cgroup v2. Check and configure if needed.
+K8S_MAJOR="${K8S_VERSION%%.*}"
+K8S_MINOR="${K8S_VERSION##*.}"
+if [ "$K8S_MAJOR" -gt 1 ] || { [ "$K8S_MAJOR" -eq 1 ] && [ "$K8S_MINOR" -ge 35 ]; }; then
+    log "	Kubernetes ${K8S_VERSION} requires cgroup v2 -- checking..."
+    CGROUP_MODE="$(stat -fc %T /sys/fs/cgroup/ 2>/dev/null || echo unknown)"
+    if [ "$CGROUP_MODE" != "cgroup2fs" ]; then
+        log "	cgroup v2 not active (detected: ${CGROUP_MODE}). Configuring and rebooting..."
+        case "$DISTRO" in
+          ubuntu | debian)
+            GRUB_DEFAULT_FILE="/etc/default/grub"
+            [ -f "$GRUB_DEFAULT_FILE" ] \
+                || die "	ERROR: $GRUB_DEFAULT_FILE not found. Cannot configure cgroup v2."
+            sudo sed -i \
+                's/^\(GRUB_CMDLINE_LINUX="[^"]*\)"/\1 systemd.unified_cgroup_hierarchy=1 cgroup_no_v1=all"/' \
+                "$GRUB_DEFAULT_FILE" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+                || die "	ERROR: Failed to update GRUB_CMDLINE_LINUX in $GRUB_DEFAULT_FILE."
+            sudo update-grub 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+                || die "	ERROR: Failed to run update-grub."
+            ;;
+          centos | rhel | rocky | almalinux)
+            sudo grubby --update-kernel=ALL --args="systemd.unified_cgroup_hierarchy=1" \
+                1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+                || die "	ERROR: Failed to set systemd.unified_cgroup_hierarchy=1 via grubby."
+            sudo grubby --update-kernel=ALL --args="cgroup_no_v1=all" \
+                1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+                || die "	ERROR: Failed to set cgroup_no_v1=all via grubby."
+            ;;
+        esac
+        log "	Kernel args updated. A reboot is required to activate cgroup v2."
+        printf "\tReboot now to continue installation? [y/N]: " >/dev/tty
+        read -r REBOOT_CONFIRM </dev/tty
+        case "$REBOOT_CONFIRM" in
+            [yY][eE][sS]|[yY])
+                log "	Rebooting -- re-run this script after the system comes back up."
+                printf "\tIMPORTANT: After the system reboots, re-run this script to complete the installation.\n" >/dev/tty
+                printf "\tPress Enter to reboot..." >/dev/tty
+                read -r </dev/tty
+                sudo reboot
+                exit 0
+                ;;
+            *)
+                die "	Reboot cancelled. Please reboot manually and re-run this script to continue."
+                ;;
+        esac
+    else
+        log "		cgroup v2 OK."
+    fi
+fi
+
 #############################################
 # Collect required passwords
 #############################################
@@ -269,6 +412,7 @@ read_password() {
     printf -v "$varname" '%s' "$val"
 }
 
+log "	NOTE: Passwords must not contain '\"', '\\', '|', '&', '!', '@', '#', '\$', or '%' characters."
 read_password "PostgreSQL user password"  POSTGRES_PASSWORD
 read_password "MongoDB root password"     MONGO_INITDB_ROOT_PASSWORD
 read_password "RabbitMQ password"         RABBITMQ_PASSWORD
@@ -304,7 +448,7 @@ sudo sysctl --system 1>>"$MAIN_LOG" 2>>"$ERR_LOG"
 log "1. Disabling firewall and MAC frameworks..."
 
 case "$DISTRO" in
-  ubuntu)
+  ubuntu | debian)
     for svc in ufw apparmor; do
         sudo systemctl stop    "$svc" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
         sudo systemctl disable "$svc" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
@@ -323,7 +467,7 @@ esac
 #############################################
 # Swap
 #############################################
-SWAP_DEVICES="`swapon --show | wc -l`"
+SWAP_DEVICES="`sudo swapon --show | wc -l`"
 if [ "$SWAP_DEVICES" -gt 0 ]; then
     log "	Swap detected -- disabling (required for Kubernetes)..."
     sudo swapoff -a 1>>"$MAIN_LOG" 2>>"$ERR_LOG"
@@ -338,7 +482,7 @@ fi
 #############################################
 pkg_remove() {
     case "$DISTRO" in
-      ubuntu)
+      ubuntu | debian)
         sudo apt-get remove -y "$@" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
         ;;
       centos | rhel | rocky | almalinux)
@@ -349,7 +493,7 @@ pkg_remove() {
 
 pkg_install() {
     case "$DISTRO" in
-      ubuntu)
+      ubuntu | debian)
         sudo apt-get install -y "$@" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
             || die "		Failed to install: $*"
         ;;
@@ -368,7 +512,7 @@ log "2. Checking for existing Docker installation..."
 if command -v docker 1>>"$MAIN_LOG" 2>>"$ERR_LOG"; then
     log "	Removing existing Docker packages..."
     case "$DISTRO" in
-      ubuntu)
+      ubuntu | debian)
         pkg_remove docker docker-engine docker.io runc
         sudo apt-get purge -y \
             docker-ce docker-ce-cli docker-buildx-plugin \
@@ -423,14 +567,14 @@ if command -v containerd 1>>"$MAIN_LOG" 2>>"$ERR_LOG"; then
     fi
 else
     case "$DISTRO" in
-      ubuntu)
+      ubuntu | debian)
         sudo apt-get update -y 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
             || die "		Failed to update apt."
-        pkg_install ca-certificates curl gnupg
+        pkg_install ca-certificates curl gnupg lsb-release openssl
         sudo mkdir -p /etc/apt/keyrings
 
         log "	Fetching Docker GPG key..."
-        curl -fsSLo docker.gpg https://download.docker.com/linux/ubuntu/gpg \
+        curl -fsSLo docker.gpg "https://download.docker.com/linux/${DISTRO}/gpg" \
             1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
             || die "		Failed to download Docker GPG key."
         sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg docker.gpg \
@@ -439,8 +583,8 @@ else
             || { rm -f docker.gpg; die "		Failed to install Docker GPG key."; }
 
         DPKG_ARCH="`dpkg --print-architecture`"
-        UBUNTU_CODENAME="`lsb_release -cs`"
-        echo "deb [arch=${DPKG_ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${UBUNTU_CODENAME} stable" \
+        DEB_CODENAME="`lsb_release -cs`"
+        echo "deb [arch=${DPKG_ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${DISTRO} ${DEB_CODENAME} stable" \
             | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null \
             || die "		Failed to add Docker repository."
 
@@ -453,7 +597,7 @@ else
         sudo yum install -y yum-utils curl 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
             || die "		Failed to install yum-utils and curl from base OS repos."
         sudo yum-config-manager --add-repo \
-            https://download.docker.com/linux/centos/docker-ce.repo \
+            "https://download.docker.com/linux/centos/docker-ce.repo" \
             1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
             || die "		Failed to add Docker yum repo."
         pkg_install containerd.io
@@ -466,6 +610,8 @@ fi
 #############################################
 # Step 4: Install Docker
 #############################################
+REAL_USER="$USER"
+
 log "4. Installing Docker engine..."
 
 pkg_install docker-ce docker-ce-cli docker-compose-plugin
@@ -485,7 +631,6 @@ done
 sudo systemctl enable docker 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
     || die "		Failed to enable Docker."
 
-REAL_USER="$USER"
 sudo usermod -aG docker "$REAL_USER" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
     || die "		Failed to add $REAL_USER to docker group."
 
@@ -495,14 +640,17 @@ sudo usermod -aG docker "$REAL_USER" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
 log "5. Deploying external-services..."
 
 EXT_SVC_DIR="/home/$REAL_USER/external-services"
-mkdir -p "$EXT_SVC_DIR" 1>>"$MAIN_LOG" 2>>"$ERR_LOG"
+mkdir -p "$EXT_SVC_DIR/config" 1>>"$MAIN_LOG" 2>>"$ERR_LOG"
 
 BASE_URL="https://raw.githubusercontent.com/lumenvox/external-services/master"
-for fname in docker-compose.yaml rabbitmq.conf .env; do
+for fname in docker-compose.yaml .env; do
     curl -fsSL -o "$EXT_SVC_DIR/$fname" "$BASE_URL/$fname" \
         1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
         || die "		Failed to download $fname from $BASE_URL."
 done
+curl -fsSL -o "$EXT_SVC_DIR/config/rabbitmq.conf" "$BASE_URL/rabbitmq.conf" \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to download rabbitmq.conf from $BASE_URL."
 
 ENV_FILE="$EXT_SVC_DIR/.env"
 
@@ -523,6 +671,40 @@ set_env_var MONGO_INITDB_ROOT_PASSWORD "$MONGO_INITDB_ROOT_PASSWORD"
 set_env_var POSTGRES_PASSWORD          "$POSTGRES_PASSWORD"
 set_env_var RABBITMQ_PASSWORD          "$RABBITMQ_PASSWORD"
 set_env_var REDIS_PASSWORD             "$REDIS_PASSWORD"
+
+log "	Writing RabbitMQ definitions file..."
+cat > "$EXT_SVC_DIR/config/definitions.json" <<RABBITMQ_DEFS
+{
+  "users": [
+    {
+      "name": "lvuser",
+      "password": "${RABBITMQ_PASSWORD}",
+      "tags": ["administrator"]
+    }
+  ],
+  "vhosts": [
+    { "name": "/" },
+    { "name": "capacity-private-cloud" }
+  ],
+  "permissions": [
+    {
+      "user": "lvuser",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    },
+    {
+      "user": "lvuser",
+      "vhost": "capacity-private-cloud",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ]
+}
+RABBITMQ_DEFS
+log "		RabbitMQ definitions written to $EXT_SVC_DIR/config/definitions.json."
 
 ( cd "$EXT_SVC_DIR" && sudo docker compose up -d 1>>"$MAIN_LOG" 2>>"$ERR_LOG" ) \
     || die "		Failed to start external-services."
@@ -566,7 +748,7 @@ KUBErepo
     sudo yum versionlock kubeadm kubelet kubectl       1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
     ;;
 
-  ubuntu)
+  ubuntu | debian)
     pkg_install apt-transport-https ca-certificates curl
     sudo mkdir -p /etc/apt/keyrings
 
@@ -633,7 +815,14 @@ if sudo test -d /etc/kubernetes/pki 2>/dev/null \
     log "	Stale state cleared."
 fi
 
-sudo kubeadm init 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+KUBEADM_EXTRA_ARGS=""
+case "$DISTRO" in
+  centos | rhel | rocky | almalinux)
+    KUBEADM_EXTRA_ARGS="--ignore-preflight-errors=SystemVerification"
+    ;;
+esac
+
+sudo kubeadm init $KUBEADM_EXTRA_ARGS 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
     || die "	Failed to initialize control plane."
 
 #############################################
@@ -705,66 +894,11 @@ done
 log "		Node '$NODE' is Ready."
 
 #############################################
-# Step 9: Install Linkerd
+# Step 9: Install Helm
 #############################################
-log "9. Installing Linkerd..."
+log "9. Installing Helm..."
 
-if ! lsmod | grep -q ip_tables; then
-    log "	ip_tables module not loaded -- loading now..."
-    sudo modprobe ip_tables 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || log "		WARNING: Could not load ip_tables. Attempting to proceed."
-fi
-
-curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install \
-    "$LINKERD_INSTALL_URL" \
-    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-    || die "		Failed to download Linkerd install script."
-
-chmod +x linkerd_install
-./linkerd_install 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-    || { rm -f linkerd_install; die "		Failed to install Linkerd CLI."; }
-rm -f linkerd_install
-
-export PATH="$PATH:$HOME/.linkerd2/bin"
-
-log "	Running Linkerd pre-check..."
-linkerd check --pre 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-    || die "	System does not meet Linkerd requirements."
-
-log "	Applying Gateway API CRDs..."
-kubectl apply \
-    -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml" \
-    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-    || die "	Failed to apply Gateway API CRDs."
-
-linkerd_apply() {
-    local label="$1" outfile="$2"
-    shift 2
-    log "	Rendering ${label}..."
-    "$@" >"$outfile" 2>>"$ERR_LOG" \
-        || { rm -f "$outfile"; die "	Failed to render ${label}."; }
-    log "	Applying ${label}..."
-    kubectl apply -f "$outfile" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || { rm -f "$outfile"; die "	Failed to apply ${label}."; }
-    rm -f "$outfile"
-}
-
-linkerd_apply "Linkerd CRDs"          linkerd_crds.yaml  linkerd install --crds
-linkerd_apply "Linkerd control plane" linkerd_cp.yaml    \
-    linkerd install --set proxyInit.runAsRoot=true --set proxyInit.iptablesMode=nft
-linkerd_apply "Linkerd viz dashboard" linkerd_viz.yaml   linkerd viz install
-
-log "	Waiting 30 seconds for Linkerd pods to start..."
-sleep 30
-
-log "	Running Linkerd post-install check..."
-linkerd check 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-    || die "		Linkerd failed post-install check. Review log files."
-
-#############################################
-# Step 10: Install Helm
-#############################################
-log "10. Installing Helm..."
+export PATH="/usr/local/bin:$PATH"
 
 curl -fsSL -o get_helm.sh \
     https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
@@ -774,6 +908,118 @@ chmod 700 get_helm.sh
 ./get_helm.sh 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
     || { rm -f get_helm.sh; die "		Failed to install Helm."; }
 rm -f get_helm.sh
+
+#############################################
+# Step 10: Install service mesh + ingress (mesh stack: $MESH_STACK)
+#############################################
+log "10. Installing service mesh + ingress (--mesh-stack ${MESH_STACK})..."
+
+if ! lsmod | grep -q ip_tables; then
+    log "	ip_tables module not loaded -- loading now..."
+    sudo modprobe ip_tables 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || log "		WARNING: Could not load ip_tables. Attempting to proceed."
+fi
+
+log "	Applying Gateway API CRDs..."
+kubectl apply \
+    -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml" \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to apply Gateway API CRDs."
+
+if [ "$MESH_STACK" = "istio" ]; then
+    log "	Downloading istioctl ${ISTIO_VERSION}..."
+    curl -fsSL "https://istio.io/downloadIstio" | ISTIO_VERSION="$ISTIO_VERSION" sh - \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to download istioctl."
+
+    export PATH="$PATH:$currentdir/istio-${ISTIO_VERSION}/bin"
+
+    log "	Running Istio pre-check..."
+    istioctl x precheck 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "	System does not meet Istio requirements."
+
+    log "	Installing Istio control plane + ingress gateway (profile: default)..."
+    istioctl install --set profile=default -y \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "	Failed to install Istio."
+
+    log "	Creating istio-ingress namespace for the Gateway resource..."
+    kubectl create namespace istio-ingress 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || log "		WARNING: istio-ingress namespace may already exist -- continuing."
+
+    log "	Adopting istio-ingress namespace into Helm ownership (avoids ownership conflict on chart deploy)..."
+    kubectl label namespace istio-ingress app.kubernetes.io/managed-by=Helm --overwrite \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || log "		WARNING: Failed to label istio-ingress namespace for Helm ownership."
+    kubectl annotate namespace istio-ingress meta.helm.sh/release-name=lumenvox --overwrite \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || log "		WARNING: Failed to annotate istio-ingress namespace release-name."
+    kubectl annotate namespace istio-ingress meta.helm.sh/release-namespace=lumenvox --overwrite \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || log "		WARNING: Failed to annotate istio-ingress namespace release-namespace."
+
+    log "	Waiting 30 seconds for Istio pods to start..."
+    sleep 30
+
+    log "	Running Istio post-install verification..."
+    istioctl analyze 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Istio failed post-install verification. Review log files."
+else
+    curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install \
+        "$LINKERD_INSTALL_URL" \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to download Linkerd install script."
+
+    chmod +x linkerd_install
+    ./linkerd_install 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || { rm -f linkerd_install; die "		Failed to install Linkerd CLI."; }
+    rm -f linkerd_install
+
+    export PATH="$PATH:$HOME/.linkerd2/bin"
+
+    log "	Running Linkerd pre-check..."
+    linkerd check --pre 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "	System does not meet Linkerd requirements."
+
+    linkerd_apply() {
+        local label="$1" outfile="$2"
+        shift 2
+        log "	Rendering ${label}..."
+        "$@" >"$outfile" 2>>"$ERR_LOG" \
+            || { rm -f "$outfile"; die "	Failed to render ${label}."; }
+        log "	Applying ${label}..."
+        kubectl apply -f "$outfile" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || { rm -f "$outfile"; die "	Failed to apply ${label}."; }
+        rm -f "$outfile"
+    }
+
+    linkerd_apply "Linkerd CRDs"          linkerd_crds.yaml  linkerd install --crds
+    linkerd_apply "Linkerd control plane" linkerd_cp.yaml    \
+        linkerd install --set proxyInit.runAsRoot=true --set proxyInit.iptablesMode=nft
+    linkerd_apply "Linkerd viz dashboard" linkerd_viz.yaml   linkerd viz install
+
+    log "	Waiting 30 seconds for Linkerd pods to start..."
+    sleep 30
+
+    log "	Running Linkerd post-install check..."
+    linkerd check 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Linkerd failed post-install check. Review log files."
+
+    log "	Installing nginx ingress controller..."
+    helm upgrade --install ingress-nginx ingress-nginx \
+        --repo https://kubernetes.github.io/ingress-nginx \
+        -n ingress-nginx --create-namespace \
+        --set controller.hostNetwork=true \
+        --version "$NGINX_INGRESS_VERSION" \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Failed to install nginx ingress controller."
+
+    log "	Waiting for nginx-ingress admission webhook to become ready..."
+    kubectl wait --for=condition=Available deployment/ingress-nginx-controller \
+        -n ingress-nginx --timeout=120s \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		nginx-ingress controller did not become ready in time."
+fi
 
 #############################################
 # Step 11: Install Capacity Private Cloud stack
@@ -803,33 +1049,98 @@ create_k8s_secret postgres-existing-secret postgresql-password    "$POSTGRES_PAS
 create_k8s_secret rabbitmq-existing-secret rabbitmq-password      "$RABBITMQ_PASSWORD"
 create_k8s_secret redis-existing-secret    redis-password         "$REDIS_PASSWORD"
 
-log "	Creating speech-tls-secret..."
+log "	Creating speech-tls-secret in lumenvox namespace..."
 kubectl create secret tls speech-tls-secret \
     --key  "$KEY_FILE" \
     --cert "$CERT_FILE" \
     -n lumenvox \
     1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-    || die "	Failed to create speech-tls-secret."
+    || die "	Failed to create speech-tls-secret in lumenvox namespace."
 
-log "	Deploying LumenVox Helm chart..."
+if [ "$MESH_STACK" = "istio" ]; then
+    log "	Creating speech-tls-secret in istio-ingress namespace (required by Gateway TLS listener)..."
+    kubectl create secret tls speech-tls-secret \
+        --key  "$KEY_FILE" \
+        --cert "$CERT_FILE" \
+        -n istio-ingress \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "	Failed to create speech-tls-secret in istio-ingress namespace."
+fi
+
+log "	Deploying LumenVox Helm chart (mesh stack: ${MESH_STACK})..."
+if [ "$MESH_STACK" = "istio" ]; then
+    HELM_MESH_ARGS=(--set global.serviceMesh.type=istio \
+                     --set global.lumenvox.ingress.className=istio \
+                     --set global.lumenvox.gateway.namespace=istio-ingress)
+else
+    HELM_MESH_ARGS=(--set global.serviceMesh.type=linkerd \
+                     --set global.lumenvox.ingress.className=nginx)
+fi
+
 helm install lumenvox lumenvox/lumenvox \
     -n lumenvox \
     -f "$VALUES_FILE" \
+    "${HELM_MESH_ARGS[@]}" \
     1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
     || die "	Failed to deploy LumenVox Helm chart."
 
-#############################################
-# Step 12: Install nginx ingress controller
-#############################################
-log "12. Installing nginx ingress controller..."
+if [ "$MESH_STACK" = "istio" ]; then
+    log "	Exposing Istio Gateway on this node's IP (externalIPs) so it is reachable on standard 443/80..."
 
-helm upgrade --install ingress-nginx ingress-nginx \
-    --repo https://kubernetes.github.io/ingress-nginx \
-    -n ingress-nginx --create-namespace \
-    --set controller.hostNetwork=true \
-    --version "$NGINX_INGRESS_VERSION" \
-    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-    || die "		Failed to install nginx ingress controller."
+
+    NODE_IP="`ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7; exit}'`"
+    if [ -z "$NODE_IP" ]; then
+        log "		WARNING: could not auto-detect this node's IP -- skipping externalIPs patch."
+        log "		         Gateway will only be reachable via NodePort. See README for manual fix."
+    else
+        GATEWAY_SVC=""
+        for attempt in $(seq 1 12); do
+            GATEWAY_SVC="`kubectl get svc -n istio-ingress -l gateway.networking.k8s.io/gateway-name=lumenvox-gateway -o jsonpath='{.items[0].metadata.name}' 2>>"$ERR_LOG" || true`"
+            [ -n "$GATEWAY_SVC" ] && break
+            log "		Waiting for Istio to auto-provision the Gateway Service (attempt ${attempt}/12)..."
+            sleep 5
+        done
+
+        if [ -z "$GATEWAY_SVC" ]; then
+            log "		WARNING: Gateway Service was not found after 60 seconds -- skipping externalIPs patch."
+            log "		         Gateway will only be reachable via NodePort. See README for manual fix."
+        else
+            kubectl patch svc "$GATEWAY_SVC" -n istio-ingress \
+                -p "{\"spec\": {\"externalIPs\": [\"${NODE_IP}\"]}}" \
+                1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+                || log "		WARNING: Failed to patch externalIPs on ${GATEWAY_SVC}. Gateway will only be reachable via NodePort."
+            log "		Gateway Service '${GATEWAY_SVC}' externalIPs set to ${NODE_IP}."
+        fi
+    fi
+fi
+
+#############################################
+# Step 12: Wait for /data/lang model directories and fix ownership
+#############################################
+LANG_DIR="/data/lang"
+LANG_SUBDIRS="AsrModels BackendModels Dict DistPackageModels downloads EuropaAsrModels installed_manifests manifests NeuralTtsModels NluModels tts vb-active"
+log "12. Waiting for /data/lang model subdirectories and fixing ownership..."
+LANG_WAIT_ATTEMPTS=0
+LANG_WAIT_MAX=60
+while :; do
+    sudo chown -R "$REAL_USER:$REAL_USER" "$LANG_DIR" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+
+    LANG_ALL_PRESENT=1
+    for sub in $LANG_SUBDIRS; do
+        sudo test -d "$LANG_DIR/$sub" 2>/dev/null || { LANG_ALL_PRESENT=0; break; }
+    done
+
+    if [ "$LANG_ALL_PRESENT" -eq 1 ] \
+            && ! sudo find "$LANG_DIR" ! -user "$REAL_USER" -print -quit 2>/dev/null | grep -q .; then
+        log "		All model subdirectories present and owned by $REAL_USER."
+        break
+    fi
+
+    LANG_WAIT_ATTEMPTS=$(( LANG_WAIT_ATTEMPTS + 1 ))
+    [ "$LANG_WAIT_ATTEMPTS" -lt "$LANG_WAIT_MAX" ] \
+        || die "	/data/lang model subdirectories were not all present/owned after $(( LANG_WAIT_MAX * 5 )) seconds."
+    sleep 5
+done
 
 #############################################
 # Step 13: Gather worker join info
@@ -865,10 +1176,12 @@ printf "\n"
 printf "Pods are now starting up. Monitor progress with:\n"
 printf "  watch kubectl get po -A\n"
 printf "\n"
-printf "Linkerd is installed but not permanently on PATH.\n"
-printf "Add this to ~/.bashrc to persist it:\n"
-printf "  export PATH=\$PATH:\$HOME/.linkerd2/bin\n"
-printf "\n"
+if [ "$MESH_STACK" = "linkerd" ]; then
+    printf "Linkerd is installed but not permanently on PATH.\n"
+    printf "Add this to ~/.bashrc to persist it:\n"
+    printf "  export PATH=\$PATH:\$HOME/.linkerd2/bin\n"
+    printf "\n"
+fi
 printf "To join a worker node to this cluster, run on the worker:\n"
 printf "  ./lumenvox-worker-install.sh <control-plane-IP> %s %s\n" "$KUBEADM_JOIN_TOKEN" "$KUBEADM_JOIN_HASH"
 printf "\n"
