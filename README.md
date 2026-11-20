@@ -106,7 +106,8 @@ Or let the installer handle TLS interactively:
 ./lumenvox-control-install.sh values.yaml
 ```
 
-With `--mesh-stack istio` (the default), Istio images are pulled from
+The installer sets up the Istio service mesh and the Istio ingress gateway.
+Istio images are pulled from
 `docker.io/istio`. The older `registry.istio.io/release` and
 `gcr.io/istio-release` registries will be permanently shut down by the Istio
 project on December 16, 2026. To pull from a private mirror or pull-through
@@ -154,10 +155,11 @@ watch kubectl get po -A
 The ingress is set up automatically, so once all pods have started, you should
 be able to make requests to the APIs.
 
-Linkerd is installed but its binary directory is not permanently added to your
-PATH. To persist it, add the following to your `~/.bashrc`:
+`istioctl` is downloaded to an `istio-<version>` directory next to the installer
+and is not permanently added to your PATH. To persist it, add the following to
+your `~/.bashrc` (adjust the path to where you ran the installer):
 ```shell
-export PATH=$PATH:$HOME/.linkerd2/bin
+export PATH=$PATH:$HOME/istio-1.30.1/bin
 ```
 
 The installing user is also added to the `docker` group during installation.
@@ -197,8 +199,11 @@ helm upgrade lumenvox lumenvox/lumenvox -n lumenvox -f values.yaml && \
 The Istio mesh settings (`serviceMesh.type`, `ingress.className`, `gateway.namespace`) are now stored
 in `values.yaml` so they are applied automatically on every upgrade without extra `--set` flags.
 
-> **Linkerd users:** update `values.yaml` to set `global.serviceMesh.type: linkerd` and
-> `global.lumenvox.ingress.className: nginx` before running the upgrade command above.
+> **Clusters installed with the earlier Linkerd + ingress-nginx option** run
+> ingress-nginx, which is affected by CVE-2026-123007. This installer supports
+> Istio only; reinstall those clusters with it. When the installer or the
+> uninstaller finds ingress-nginx or Linkerd from an earlier install, it removes
+> them.
 
 ## Uninstalling
 
@@ -214,9 +219,9 @@ Run the control plane uninstaller with no arguments:
 ```
 
 This will remove, in order:
-* The LumenVox and ingress-nginx Helm releases and their namespaces
-* Linkerd (viz dashboard and control plane) and the Gateway API CRDs
-* The Kubernetes cluster (kubeadm reset, all state and config)
+* The LumenVox Helm release and its namespace
+* The Gateway API CRDs
+* The Kubernetes cluster (kubeadm reset, all state and config), including Istio
 * Kubernetes packages (kubelet, kubeadm, kubectl) and their repositories
 * Helm
 * The external-services Docker Compose stack and its data volumes
@@ -251,10 +256,7 @@ The worker uninstaller removes containerd, all Kubernetes components and state, 
 
 To remove the Istio service mesh and Istio Gateway while keeping the Kubernetes cluster and the LumenVox workloads, run the following on the control plane node:
 ```shell
-./lumenvox-istio-uninstall.sh [--install-linkerd] [path-to-istio-directory]
+./lumenvox-istio-uninstall.sh [path-to-istio-directory]
 ```
 
-* `--install-linkerd`: after removing Istio, installs Linkerd and the ingress-nginx controller (the `--mesh-stack linkerd` setup).
 * `path-to-istio-directory`: the `istio-<version>` directory the installer downloaded (it contains `bin/istioctl`). If omitted, the script looks for `istioctl` on the `PATH`, then searches under the current directory and `$HOME`.
-
-To move an existing cluster from Istio to Linkerd end to end, including reinstalling LumenVox, follow [README-switch-istio-to-linkerd.md](README-switch-istio-to-linkerd.md).

@@ -19,7 +19,7 @@ fi
 # Confirmation prompt
 #############################################
 printf "WARNING: This script will completely remove the Capacity Private Cloud stack, Kubernetes,\n"
-printf "         Linkerd, Helm, Docker, containerd, all associated data,\n"
+printf "         Istio, Helm, Docker, containerd, all associated data,\n"
 printf "         and all Capacity Private Cloud model files under /data.\n"
 printf "         This action is IRREVERSIBLE.\n\n"
 printf "Proceed? [y/N]: "
@@ -81,35 +81,17 @@ REAL_USER="$USER"
 log "1. Removing LumenVox Helm release and namespace..."
 
 if command -v helm &>/dev/null && command -v kubectl &>/dev/null; then
-    run helm uninstall lumenvox     -n lumenvox     --ignore-not-found 2>/dev/null || \
+    run helm uninstall lumenvox -n lumenvox --ignore-not-found 2>/dev/null || \
         warn "helm uninstall lumenvox failed — may already be removed."
-    run helm uninstall ingress-nginx -n ingress-nginx --ignore-not-found 2>/dev/null || \
-        warn "helm uninstall ingress-nginx failed — may already be removed."
-    run kubectl delete ns lumenvox     --ignore-not-found=true
-    run kubectl delete ns ingress-nginx --ignore-not-found=true
+    run kubectl delete ns lumenvox --ignore-not-found=true
 else
     warn "helm or kubectl not found — skipping Helm/namespace removal."
 fi
 
 #############################################
-# Step 2: Remove Linkerd
+# Step 2: Remove Gateway API CRDs, and ingress-nginx / Linkerd if found
 #############################################
-log "2. Removing Linkerd..."
-
-# Add linkerd to PATH in case it was installed but not yet in the shell's PATH
-export PATH="$PATH:$HOME/.linkerd2/bin"
-
-if command -v linkerd &>/dev/null && command -v kubectl &>/dev/null; then
-    # Pipe directly — do not wrap in run() as these are compound commands
-    log "\tUninstalling Linkerd viz..."
-    linkerd viz uninstall 2>>"$ERR_LOG" | kubectl delete --ignore-not-found=true -f - \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" || warn "Failed to uninstall Linkerd viz."
-    log "\tUninstalling Linkerd control plane..."
-    linkerd uninstall 2>>"$ERR_LOG" | kubectl delete --ignore-not-found=true -f - \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" || warn "Failed to uninstall Linkerd control plane."
-else
-    warn "linkerd CLI or kubectl not found — skipping Linkerd uninstall."
-fi
+log "2. Removing Gateway API CRDs (and ingress-nginx / Linkerd, if found)..."
 
 # Remove Gateway API CRDs applied during install
 if command -v kubectl &>/dev/null; then
@@ -119,11 +101,33 @@ if command -v kubectl &>/dev/null; then
         --ignore-not-found=true
 fi
 
-# Remove the linkerd binary and its directory
-run rm -rf "$HOME/.linkerd2"
+# Earlier versions of the installer offered a Linkerd + ingress-nginx stack.
+# Remove it when it is found on this cluster.
+if command -v kubectl &>/dev/null && kubectl get ns ingress-nginx &>/dev/null; then
+    log "\tingress-nginx found (earlier install) — removing..."
+    if command -v helm &>/dev/null; then
+        run helm uninstall ingress-nginx -n ingress-nginx --ignore-not-found
+    fi
+    run kubectl delete ns ingress-nginx --ignore-not-found=true
+fi
 
-# Remove linkerd PATH entry from .bashrc if it was added
-if [ -f "$HOME/.bashrc" ]; then
+export PATH="$PATH:$HOME/.linkerd2/bin"
+if command -v kubectl &>/dev/null && kubectl get ns linkerd &>/dev/null; then
+    log "\tLinkerd found (earlier install) — removing..."
+    if command -v linkerd &>/dev/null; then
+        # Pipe directly — do not wrap in run() as these are compound commands
+        linkerd viz uninstall 2>>"$ERR_LOG" | kubectl delete --ignore-not-found=true -f - \
+            1>>"$MAIN_LOG" 2>>"$ERR_LOG" || warn "Failed to uninstall Linkerd viz."
+        linkerd uninstall 2>>"$ERR_LOG" | kubectl delete --ignore-not-found=true -f - \
+            1>>"$MAIN_LOG" 2>>"$ERR_LOG" || warn "Failed to uninstall Linkerd control plane."
+    else
+        run kubectl delete ns linkerd linkerd-viz --ignore-not-found=true
+    fi
+fi
+if [ -d "$HOME/.linkerd2" ]; then
+    run rm -rf "$HOME/.linkerd2"
+fi
+if [ -f "$HOME/.bashrc" ] && grep -q '\.linkerd2/bin' "$HOME/.bashrc"; then
     sed -i '/\.linkerd2\/bin/d' "$HOME/.bashrc" 2>>"$ERR_LOG" || \
         warn "Failed to remove linkerd PATH entry from .bashrc."
 fi

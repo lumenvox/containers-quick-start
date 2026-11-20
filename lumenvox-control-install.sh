@@ -4,7 +4,7 @@ set -euo pipefail
 #############################################
 # Parse optional flags (--mesh-stack), leaving positional args intact
 #############################################
-MESH_STACK=""    # empty = not yet chosen; interactive prompt below decides the default (istio)
+MESH_STACK="istio" # only "istio" is supported; the flag is kept for scripts that pass it
 CHART_VERSION="" # empty = install latest chart version
 
 POSITIONAL_ARGS=()
@@ -12,7 +12,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --mesh-stack)
             if [ $# -lt 2 ]; then
-                printf "Error: --mesh-stack requires a value (linkerd|istio)\n"
+                printf "Error: --mesh-stack requires a value (istio)\n"
                 exit 1
             fi
             MESH_STACK="$2"
@@ -35,9 +35,14 @@ done
 set -- "${POSITIONAL_ARGS[@]}"
 
 case "$MESH_STACK" in
-    ""|linkerd|istio) ;;
+    istio) ;;
+    linkerd)
+        printf "Error: the Linkerd + ingress-nginx stack is no longer available.\n"
+        printf "       This installer uses the Istio service mesh and the Istio ingress gateway.\n"
+        exit 1
+        ;;
     *)
-        printf "Error: --mesh-stack must be 'linkerd' or 'istio' (got '%s')\n" "$MESH_STACK"
+        printf "Error: --mesh-stack must be 'istio' (got '%s')\n" "$MESH_STACK"
         exit 1
         ;;
 esac
@@ -47,11 +52,10 @@ esac
 #############################################
 if [ $# -ne 1 ] && [ $# -ne 3 ]; then
     printf "Usage:\n"
-    printf "  ./lumenvox-control-install.sh [--mesh-stack linkerd|istio] [--chart-version X.Y.Z] values.yaml\n"
-    printf "  ./lumenvox-control-install.sh [--mesh-stack linkerd|istio] [--chart-version X.Y.Z] values.yaml server.key server.crt\n"
+    printf "  ./lumenvox-control-install.sh [--chart-version X.Y.Z] values.yaml\n"
+    printf "  ./lumenvox-control-install.sh [--chart-version X.Y.Z] values.yaml server.key server.crt\n"
     printf "\n"
-    printf "  --mesh-stack istio      (default) Istio service mesh + Istio ingress gateway\n"
-    printf "  --mesh-stack linkerd    Linkerd service mesh + nginx-ingress\n"
+    printf "  Installs the Istio service mesh and the Istio ingress gateway.\n"
     printf "  --chart-version X.Y.Z  Install a specific chart version (default: latest)\n"
     exit 1
 fi
@@ -225,8 +229,6 @@ GATEWAY_API_VERSION="v1.2.1"
 ISTIO_VERSION="1.30.1"
 # registry.istio.io/release and gcr.io/istio-release are being retired; override with ISTIO_HUB=<mirror>.
 ISTIO_HUB="${ISTIO_HUB:-docker.io/istio}"
-NGINX_INGRESS_VERSION="4.14.5"
-LINKERD_INSTALL_URL="https://assets.lumenvox.com/third-party/linkerd/linkerd_install"
 
 #############################################
 # Minimum hardware requirements
@@ -246,25 +248,6 @@ true > "$ERR_LOG"
 log() { printf "%s\n" "$*" | tee -a "$MAIN_LOG"; }
 err() { printf "%s\n" "$*" | tee -a "$MAIN_LOG" "$ERR_LOG" >&2; }
 die() { err "$*"; exit 1; }
-
-#############################################
-# Mesh stack: interactive prompt if not provided via --mesh-stack
-#############################################
-if [ -z "$MESH_STACK" ]; then
-    printf "\nNo --mesh-stack provided -- choose a service mesh + ingress stack.\n"
-    printf "\t1) Istio  - Istio service mesh + Istio ingress gateway (recommended)\n"
-    printf "\t2) Linkerd - Linkerd service mesh + nginx ingress controller\n"
-    while true; do
-        printf "\tChoice [1-2]: "
-        read -r MESH_STACK_CHOICE
-        case "$MESH_STACK_CHOICE" in
-            1) MESH_STACK="istio"; break ;;
-            2) MESH_STACK="linkerd"; break ;;
-            *) printf "\t\tPlease enter 1 or 2.\n" ;;
-        esac
-    done
-    printf "\t\tSelected: %s\n" "$MESH_STACK"
-fi
 
 #############################################
 # Step 0: OS detection & validation
@@ -816,6 +799,32 @@ fi
 
 log "7. Initializing Kubernetes control plane..."
 
+# Earlier versions of this installer offered a Linkerd + ingress-nginx stack.
+# If a cluster from such an install is still running here, remove both before
+# the cluster is reset below.
+if [ -f "$HOME/.kube/config" ] && kubectl get ns --request-timeout=10s &>/dev/null; then
+    if kubectl get ns ingress-nginx &>/dev/null; then
+        log "	ingress-nginx found (earlier install) -- removing..."
+        if command -v helm &>/dev/null; then
+            helm uninstall ingress-nginx -n ingress-nginx 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+        fi
+        kubectl delete ns ingress-nginx --ignore-not-found=true --wait=false \
+            1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    fi
+    if kubectl get ns linkerd &>/dev/null; then
+        log "	Linkerd found (earlier install) -- removing..."
+        kubectl delete ns linkerd linkerd-viz --ignore-not-found=true --wait=false \
+            1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    fi
+fi
+if [ -d "$HOME/.linkerd2" ]; then
+    log "	Removing Linkerd CLI from an earlier install ($HOME/.linkerd2)..."
+    rm -rf "$HOME/.linkerd2"
+    if [ -f "$HOME/.bashrc" ]; then
+        sed -i '/\.linkerd2\/bin/d' "$HOME/.bashrc" 2>>"$ERR_LOG" || true
+    fi
+fi
+
 if sudo test -d /etc/kubernetes/pki 2>/dev/null \
         || sudo test -d /etc/kubernetes/manifests 2>/dev/null; then
     log "	Stale Kubernetes state detected -- running kubeadm reset before init..."
@@ -922,9 +931,9 @@ chmod 700 get_helm.sh
 rm -f get_helm.sh
 
 #############################################
-# Step 10: Install service mesh + ingress (mesh stack: $MESH_STACK)
+# Step 10: Install Istio (service mesh + ingress gateway)
 #############################################
-log "10. Installing service mesh + ingress (--mesh-stack ${MESH_STACK})..."
+log "10. Installing Istio (service mesh + ingress gateway)..."
 
 if ! lsmod | grep -q ip_tables; then
     log "	ip_tables module not loaded -- loading now..."
@@ -938,106 +947,49 @@ kubectl apply \
     1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
     || die "	Failed to apply Gateway API CRDs."
 
-if [ "$MESH_STACK" = "istio" ]; then
-    log "	Downloading istioctl ${ISTIO_VERSION}..."
-    curl -fsSL "https://istio.io/downloadIstio" | ISTIO_VERSION="$ISTIO_VERSION" sh - \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "		Failed to download istioctl."
+log "	Downloading istioctl ${ISTIO_VERSION}..."
+curl -fsSL "https://istio.io/downloadIstio" | ISTIO_VERSION="$ISTIO_VERSION" sh - \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Failed to download istioctl."
 
-    export PATH="$PATH:$currentdir/istio-${ISTIO_VERSION}/bin"
+export PATH="$PATH:$currentdir/istio-${ISTIO_VERSION}/bin"
 
-    log "	Running Istio pre-check..."
-    istioctl x precheck 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "	System does not meet Istio requirements."
+log "	Running Istio pre-check..."
+istioctl x precheck 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	System does not meet Istio requirements."
 
-    log "	Verifying Istio images are pullable from ${ISTIO_HUB}..."
-    sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
-        pull "${ISTIO_HUB}/pilot:${ISTIO_VERSION}" \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "		Cannot pull ${ISTIO_HUB}/pilot:${ISTIO_VERSION}. Check internet/proxy access to the registry, or set ISTIO_HUB to a reachable mirror."
+log "	Verifying Istio images are pullable from ${ISTIO_HUB}..."
+sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
+    pull "${ISTIO_HUB}/pilot:${ISTIO_VERSION}" \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Cannot pull ${ISTIO_HUB}/pilot:${ISTIO_VERSION}. Check internet/proxy access to the registry, or set ISTIO_HUB to a reachable mirror."
 
-    log "	Installing Istio control plane + ingress gateway (profile: default, hub: ${ISTIO_HUB})..."
-    istioctl install --set profile=default --set hub="${ISTIO_HUB}" -y \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "	Failed to install Istio."
+log "	Installing Istio control plane + ingress gateway (profile: default, hub: ${ISTIO_HUB})..."
+istioctl install --set profile=default --set hub="${ISTIO_HUB}" -y \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to install Istio."
 
-    log "	Creating istio-ingress namespace for the Gateway resource..."
-    kubectl create namespace istio-ingress 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || log "		WARNING: istio-ingress namespace may already exist -- continuing."
+log "	Creating istio-ingress namespace for the Gateway resource..."
+kubectl create namespace istio-ingress 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || log "		WARNING: istio-ingress namespace may already exist -- continuing."
 
-    log "	Adopting istio-ingress namespace into Helm ownership (avoids ownership conflict on chart deploy)..."
-    kubectl label namespace istio-ingress app.kubernetes.io/managed-by=Helm --overwrite \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || log "		WARNING: Failed to label istio-ingress namespace for Helm ownership."
-    kubectl annotate namespace istio-ingress meta.helm.sh/release-name=lumenvox --overwrite \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || log "		WARNING: Failed to annotate istio-ingress namespace release-name."
-    kubectl annotate namespace istio-ingress meta.helm.sh/release-namespace=lumenvox --overwrite \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || log "		WARNING: Failed to annotate istio-ingress namespace release-namespace."
+log "	Adopting istio-ingress namespace into Helm ownership (avoids ownership conflict on chart deploy)..."
+kubectl label namespace istio-ingress app.kubernetes.io/managed-by=Helm --overwrite \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || log "		WARNING: Failed to label istio-ingress namespace for Helm ownership."
+kubectl annotate namespace istio-ingress meta.helm.sh/release-name=lumenvox --overwrite \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || log "		WARNING: Failed to annotate istio-ingress namespace release-name."
+kubectl annotate namespace istio-ingress meta.helm.sh/release-namespace=lumenvox --overwrite \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || log "		WARNING: Failed to annotate istio-ingress namespace release-namespace."
 
-    log "	Waiting 30 seconds for Istio pods to start..."
-    sleep 30
+log "	Waiting 30 seconds for Istio pods to start..."
+sleep 30
 
-    log "	Running Istio post-install verification..."
-    istioctl analyze 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "		Istio failed post-install verification. Review log files."
-else
-    curl --proto '=https' --tlsv1.2 -sSfLo linkerd_install \
-        "$LINKERD_INSTALL_URL" \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "		Failed to download Linkerd install script."
-
-    chmod +x linkerd_install
-    ./linkerd_install 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || { rm -f linkerd_install; die "		Failed to install Linkerd CLI."; }
-    rm -f linkerd_install
-
-    export PATH="$PATH:$HOME/.linkerd2/bin"
-
-    log "	Running Linkerd pre-check..."
-    linkerd check --pre 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "	System does not meet Linkerd requirements."
-
-    linkerd_apply() {
-        local label="$1" outfile="$2"
-        shift 2
-        log "	Rendering ${label}..."
-        "$@" >"$outfile" 2>>"$ERR_LOG" \
-            || { rm -f "$outfile"; die "	Failed to render ${label}."; }
-        log "	Applying ${label}..."
-        kubectl apply -f "$outfile" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-            || { rm -f "$outfile"; die "	Failed to apply ${label}."; }
-        rm -f "$outfile"
-    }
-
-    linkerd_apply "Linkerd CRDs"          linkerd_crds.yaml  linkerd install --crds
-    linkerd_apply "Linkerd control plane" linkerd_cp.yaml    \
-        linkerd install --set proxyInit.runAsRoot=true --set proxyInit.iptablesMode=nft
-    linkerd_apply "Linkerd viz dashboard" linkerd_viz.yaml   linkerd viz install
-
-    log "	Waiting 30 seconds for Linkerd pods to start..."
-    sleep 30
-
-    log "	Running Linkerd post-install check..."
-    linkerd check 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "		Linkerd failed post-install check. Review log files."
-
-    log "	Installing nginx ingress controller..."
-    helm upgrade --install ingress-nginx ingress-nginx \
-        --repo https://kubernetes.github.io/ingress-nginx \
-        -n ingress-nginx --create-namespace \
-        --set controller.hostNetwork=true \
-        --version "$NGINX_INGRESS_VERSION" \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "		Failed to install nginx ingress controller."
-
-    log "	Waiting for nginx-ingress admission webhook to become ready..."
-    kubectl wait --for=condition=Available deployment/ingress-nginx-controller \
-        -n ingress-nginx --timeout=120s \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "		nginx-ingress controller did not become ready in time."
-fi
+log "	Running Istio post-install verification..."
+istioctl analyze 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "		Istio failed post-install verification. Review log files."
 
 #############################################
 # Step 11: Install Capacity Private Cloud stack
@@ -1075,25 +1027,18 @@ kubectl create secret tls speech-tls-secret \
     1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
     || die "	Failed to create speech-tls-secret in lumenvox namespace."
 
-if [ "$MESH_STACK" = "istio" ]; then
-    log "	Creating speech-tls-secret in istio-ingress namespace (required by Gateway TLS listener)..."
-    kubectl create secret tls speech-tls-secret \
-        --key  "$KEY_FILE" \
-        --cert "$CERT_FILE" \
-        -n istio-ingress \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "	Failed to create speech-tls-secret in istio-ingress namespace."
-fi
+log "	Creating speech-tls-secret in istio-ingress namespace (required by Gateway TLS listener)..."
+kubectl create secret tls speech-tls-secret \
+    --key  "$KEY_FILE" \
+    --cert "$CERT_FILE" \
+    -n istio-ingress \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to create speech-tls-secret in istio-ingress namespace."
 
-log "	Deploying LumenVox Helm chart (mesh stack: ${MESH_STACK})..."
-if [ "$MESH_STACK" = "istio" ]; then
-    HELM_MESH_ARGS=(--set global.serviceMesh.type=istio \
-                     --set global.lumenvox.ingress.className=istio \
-                     --set global.lumenvox.gateway.namespace=istio-ingress)
-else
-    HELM_MESH_ARGS=(--set global.serviceMesh.type=linkerd \
-                     --set global.lumenvox.ingress.className=nginx)
-fi
+log "	Deploying LumenVox Helm chart..."
+HELM_MESH_ARGS=(--set global.serviceMesh.type=istio \
+                --set global.lumenvox.ingress.className=istio \
+                --set global.lumenvox.gateway.namespace=istio-ingress)
 
 HELM_VERSION_ARG=()
 [ -n "$CHART_VERSION" ] && HELM_VERSION_ARG=(--version "$CHART_VERSION")
@@ -1106,39 +1051,37 @@ helm install lumenvox lumenvox/lumenvox \
     1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
     || die "	Failed to deploy LumenVox Helm chart."
 
-if [ "$MESH_STACK" = "istio" ]; then
-    log "	Labelling lumenvox namespace for Istio sidecar injection..."
-    kubectl label namespace lumenvox istio-injection=enabled --overwrite \
-        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-        || die "	Failed to label lumenvox namespace for Istio sidecar injection."
-    log "		lumenvox namespace labelled: istio-injection=enabled."
+log "	Labelling lumenvox namespace for Istio sidecar injection..."
+kubectl label namespace lumenvox istio-injection=enabled --overwrite \
+    1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+    || die "	Failed to label lumenvox namespace for Istio sidecar injection."
+log "		lumenvox namespace labelled: istio-injection=enabled."
 
-    log "	Exposing Istio Gateway on this node's IP (externalIPs) so it is reachable on standard 443/80..."
+log "	Exposing Istio Gateway on this node's IP (externalIPs) so it is reachable on standard 443/80..."
 
 
-    NODE_IP="`ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7; exit}'`"
-    if [ -z "$NODE_IP" ]; then
-        log "		WARNING: could not auto-detect this node's IP -- skipping externalIPs patch."
+NODE_IP="`ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7; exit}'`"
+if [ -z "$NODE_IP" ]; then
+    log "		WARNING: could not auto-detect this node's IP -- skipping externalIPs patch."
+    log "		         Gateway will only be reachable via NodePort. See README for manual fix."
+else
+    GATEWAY_SVC=""
+    for attempt in $(seq 1 12); do
+        GATEWAY_SVC="`kubectl get svc -n istio-ingress -l gateway.networking.k8s.io/gateway-name=lumenvox-gateway -o jsonpath='{.items[0].metadata.name}' 2>>"$ERR_LOG" || true`"
+        [ -n "$GATEWAY_SVC" ] && break
+        log "		Waiting for Istio to auto-provision the Gateway Service (attempt ${attempt}/12)..."
+        sleep 5
+    done
+
+    if [ -z "$GATEWAY_SVC" ]; then
+        log "		WARNING: Gateway Service was not found after 60 seconds -- skipping externalIPs patch."
         log "		         Gateway will only be reachable via NodePort. See README for manual fix."
     else
-        GATEWAY_SVC=""
-        for attempt in $(seq 1 12); do
-            GATEWAY_SVC="`kubectl get svc -n istio-ingress -l gateway.networking.k8s.io/gateway-name=lumenvox-gateway -o jsonpath='{.items[0].metadata.name}' 2>>"$ERR_LOG" || true`"
-            [ -n "$GATEWAY_SVC" ] && break
-            log "		Waiting for Istio to auto-provision the Gateway Service (attempt ${attempt}/12)..."
-            sleep 5
-        done
-
-        if [ -z "$GATEWAY_SVC" ]; then
-            log "		WARNING: Gateway Service was not found after 60 seconds -- skipping externalIPs patch."
-            log "		         Gateway will only be reachable via NodePort. See README for manual fix."
-        else
-            kubectl patch svc "$GATEWAY_SVC" -n istio-ingress \
-                -p "{\"spec\": {\"externalIPs\": [\"${NODE_IP}\"]}}" \
-                1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
-                || log "		WARNING: Failed to patch externalIPs on ${GATEWAY_SVC}. Gateway will only be reachable via NodePort."
-            log "		Gateway Service '${GATEWAY_SVC}' externalIPs set to ${NODE_IP}."
-        fi
+        kubectl patch svc "$GATEWAY_SVC" -n istio-ingress \
+            -p "{\"spec\": {\"externalIPs\": [\"${NODE_IP}\"]}}" \
+            1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+            || log "		WARNING: Failed to patch externalIPs on ${GATEWAY_SVC}. Gateway will only be reachable via NodePort."
+        log "		Gateway Service '${GATEWAY_SVC}' externalIPs set to ${NODE_IP}."
     fi
 fi
 
@@ -1205,12 +1148,6 @@ printf "\n"
 printf "Pods are now starting up. Monitor progress with:\n"
 printf "  watch kubectl get po -A\n"
 printf "\n"
-if [ "$MESH_STACK" = "linkerd" ]; then
-    printf "Linkerd is installed but not permanently on PATH.\n"
-    printf "Add this to ~/.bashrc to persist it:\n"
-    printf "  export PATH=\$PATH:\$HOME/.linkerd2/bin\n"
-    printf "\n"
-fi
 printf "To join a worker node to this cluster, run on the worker:\n"
 printf "  ./lumenvox-worker-install.sh <control-plane-IP> %s %s\n" "$KUBEADM_JOIN_TOKEN" "$KUBEADM_JOIN_HASH"
 printf "\n"
