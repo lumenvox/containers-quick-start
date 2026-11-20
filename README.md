@@ -106,6 +106,15 @@ Or let the installer handle TLS interactively:
 ./lumenvox-control-install.sh values.yaml
 ```
 
+With `--mesh-stack istio` (the default), Istio images are pulled from
+`docker.io/istio`. The older `registry.istio.io/release` and
+`gcr.io/istio-release` registries will be permanently shut down by the Istio
+project on December 16, 2026. To pull from a private mirror or pull-through
+cache instead, set `ISTIO_HUB`:
+```shell
+ISTIO_HUB=my-registry.example.com/istio ./lumenvox-control-install.sh values.yaml
+```
+
 Don't be concerned if the script takes some time; some steps will take longer
 than others. Testing has shown a running time of around 7 minutes, but this
 may vary.
@@ -172,6 +181,25 @@ C:\Windows\System32\drivers\etc\hosts
 > Note: Requests to the speech API must use the certificate from the
 > installation. The speech API hostname must match the certificate SAN.
 
+## Upgrading the LumenVox Helm Chart
+
+To upgrade to a newer chart version, run the following sequence. The `kubectl label` step is required because
+`helm upgrade` resets namespace labels, which removes the Istio sidecar injection label and causes pods to
+restart without sidecars.
+
+```shell
+helm repo update
+helm upgrade lumenvox lumenvox/lumenvox -n lumenvox -f values.yaml && \
+  kubectl label namespace lumenvox istio-injection=enabled --overwrite && \
+  kubectl rollout restart deployment -n lumenvox
+```
+
+The Istio mesh settings (`serviceMesh.type`, `ingress.className`, `gateway.namespace`) are now stored
+in `values.yaml` so they are applied automatically on every upgrade without extra `--set` flags.
+
+> **Linkerd users:** update `values.yaml` to set `global.serviceMesh.type: linkerd` and
+> `global.lumenvox.ingress.className: nginx` before running the upgrade command above.
+
 ## Uninstalling
 
 Both uninstaller scripts must be run as a non-root user with sudo privileges, the same requirement as the installers.
@@ -218,3 +246,15 @@ kubectl delete node <NODE_NAME>
 ```
 
 The worker uninstaller removes containerd, all Kubernetes components and state, CNI configuration, and the kernel module and sysctl configuration written by the installer. A reboot is recommended after completion.
+
+### Removing Istio Only
+
+To remove the Istio service mesh and Istio Gateway while keeping the Kubernetes cluster and the LumenVox workloads, run the following on the control plane node:
+```shell
+./lumenvox-istio-uninstall.sh [--install-linkerd] [path-to-istio-directory]
+```
+
+* `--install-linkerd`: after removing Istio, installs Linkerd and the ingress-nginx controller (the `--mesh-stack linkerd` setup).
+* `path-to-istio-directory`: the `istio-<version>` directory the installer downloaded (it contains `bin/istioctl`). If omitted, the script looks for `istioctl` on the `PATH`, then searches under the current directory and `$HOME`.
+
+To move an existing cluster from Istio to Linkerd end to end, including reinstalling LumenVox, follow [README-switch-istio-to-linkerd.md](README-switch-istio-to-linkerd.md).

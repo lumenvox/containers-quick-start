@@ -6,13 +6,17 @@ global:
     clusterGuid: "<lumenvox-to-provide-cluster-guid>"
   defaultNamespace: "lumenvox"
   hostnameSuffix: ".testmachine.com"
+  serviceMesh:
+    type: istio
   lumenvox:
     ingress:
-      className: nginx
+      className: istio
+    gateway:
+      namespace: istio-ingress
     loggingVerbosity: "warn"
     redisTtl: 4h
   image:
-    tag: ":8.0"
+    tag: ":8.1"
   rabbitmq:
     enableTLS: false
     auth:
@@ -41,6 +45,10 @@ global:
   enableItn: false
   asrLanguages:
     - name: "en"
+  transcribeRealtime:
+    enabled: false
+  transcribeBatch:
+    enabled: false
   ttsLanguages:
     - name: "en_us"
       legacyEnabled: false

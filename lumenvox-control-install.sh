@@ -4,7 +4,8 @@ set -euo pipefail
 #############################################
 # Parse optional flags (--mesh-stack), leaving positional args intact
 #############################################
-MESH_STACK=""   # empty = not yet chosen; interactive prompt below decides the default (istio)
+MESH_STACK=""    # empty = not yet chosen; interactive prompt below decides the default (istio)
+CHART_VERSION="" # empty = install latest chart version
 
 POSITIONAL_ARGS=()
 while [ $# -gt 0 ]; do
@@ -15,6 +16,14 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             MESH_STACK="$2"
+            shift 2
+            ;;
+        --chart-version)
+            if [ $# -lt 2 ]; then
+                printf "Error: --chart-version requires a value (e.g. 7.1.0)\n"
+                exit 1
+            fi
+            CHART_VERSION="$2"
             shift 2
             ;;
         *)
@@ -38,11 +47,12 @@ esac
 #############################################
 if [ $# -ne 1 ] && [ $# -ne 3 ]; then
     printf "Usage:\n"
-    printf "  ./lumenvox-control-install.sh [--mesh-stack linkerd|istio] values.yaml\n"
-    printf "  ./lumenvox-control-install.sh [--mesh-stack linkerd|istio] values.yaml server.key server.crt\n"
+    printf "  ./lumenvox-control-install.sh [--mesh-stack linkerd|istio] [--chart-version X.Y.Z] values.yaml\n"
+    printf "  ./lumenvox-control-install.sh [--mesh-stack linkerd|istio] [--chart-version X.Y.Z] values.yaml server.key server.crt\n"
     printf "\n"
-    printf "  --mesh-stack istio    (default) Istio service mesh + Istio ingress gateway\n"
-    printf "  --mesh-stack linkerd  Linkerd service mesh + nginx-ingress\n"
+    printf "  --mesh-stack istio      (default) Istio service mesh + Istio ingress gateway\n"
+    printf "  --mesh-stack linkerd    Linkerd service mesh + nginx-ingress\n"
+    printf "  --chart-version X.Y.Z  Install a specific chart version (default: latest)\n"
     exit 1
 fi
 
@@ -213,6 +223,8 @@ CRICTL_VERSION="v1.35.0"
 CALICO_VERSION="v3.30.7"
 GATEWAY_API_VERSION="v1.2.1"
 ISTIO_VERSION="1.30.1"
+# registry.istio.io/release and gcr.io/istio-release are being retired; override with ISTIO_HUB=<mirror>.
+ISTIO_HUB="${ISTIO_HUB:-docker.io/istio}"
 NGINX_INGRESS_VERSION="4.14.5"
 LINKERD_INSTALL_URL="https://assets.lumenvox.com/third-party/linkerd/linkerd_install"
 
@@ -938,8 +950,14 @@ if [ "$MESH_STACK" = "istio" ]; then
     istioctl x precheck 1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
         || die "	System does not meet Istio requirements."
 
-    log "	Installing Istio control plane + ingress gateway (profile: default)..."
-    istioctl install --set profile=default -y \
+    log "	Verifying Istio images are pullable from ${ISTIO_HUB}..."
+    sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
+        pull "${ISTIO_HUB}/pilot:${ISTIO_VERSION}" \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "		Cannot pull ${ISTIO_HUB}/pilot:${ISTIO_VERSION}. Check internet/proxy access to the registry, or set ISTIO_HUB to a reachable mirror."
+
+    log "	Installing Istio control plane + ingress gateway (profile: default, hub: ${ISTIO_HUB})..."
+    istioctl install --set profile=default --set hub="${ISTIO_HUB}" -y \
         1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
         || die "	Failed to install Istio."
 
@@ -1077,14 +1095,24 @@ else
                      --set global.lumenvox.ingress.className=nginx)
 fi
 
+HELM_VERSION_ARG=()
+[ -n "$CHART_VERSION" ] && HELM_VERSION_ARG=(--version "$CHART_VERSION")
+
 helm install lumenvox lumenvox/lumenvox \
     -n lumenvox \
     -f "$VALUES_FILE" \
     "${HELM_MESH_ARGS[@]}" \
+    "${HELM_VERSION_ARG[@]}" \
     1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
     || die "	Failed to deploy LumenVox Helm chart."
 
 if [ "$MESH_STACK" = "istio" ]; then
+    log "	Labelling lumenvox namespace for Istio sidecar injection..."
+    kubectl label namespace lumenvox istio-injection=enabled --overwrite \
+        1>>"$MAIN_LOG" 2>>"$ERR_LOG" \
+        || die "	Failed to label lumenvox namespace for Istio sidecar injection."
+    log "		lumenvox namespace labelled: istio-injection=enabled."
+
     log "	Exposing Istio Gateway on this node's IP (externalIPs) so it is reachable on standard 443/80..."
 
 
@@ -1123,7 +1151,8 @@ log "12. Waiting for /data/lang model subdirectories and fixing ownership..."
 LANG_WAIT_ATTEMPTS=0
 LANG_WAIT_MAX=60
 while :; do
-    sudo chown -R "$REAL_USER:$REAL_USER" "$LANG_DIR" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
+    # Force ownership to UID 1000 and GID 1000
+    sudo chown -R "1000:1000" "$LANG_DIR" 1>>"$MAIN_LOG" 2>>"$ERR_LOG" || true
 
     LANG_ALL_PRESENT=1
     for sub in $LANG_SUBDIRS; do
@@ -1131,8 +1160,8 @@ while :; do
     done
 
     if [ "$LANG_ALL_PRESENT" -eq 1 ] \
-            && ! sudo find "$LANG_DIR" ! -user "$REAL_USER" -print -quit 2>/dev/null | grep -q .; then
-        log "		All model subdirectories present and owned by $REAL_USER."
+            && ! sudo find "$LANG_DIR" ! -user 1000 -print -quit 2>/dev/null | grep -q .; then
+        log "		All model subdirectories present and owned by 1000."
         break
     fi
 
